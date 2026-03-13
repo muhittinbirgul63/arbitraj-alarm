@@ -229,6 +229,9 @@ def karsilastir(coin, usdt_fiyat, tl_fiyat, borsa_usdt, borsa_tl, kur):
 
 def bot_calistir():
     print("Bot başlatılıyor...")
+    print(f"CHAT_ID_06: {os.getenv('CHAT_ID_06')}")
+    print(f"CHAT_ID_15: {os.getenv('CHAT_ID_15')}")
+    print(f"CHAT_ID_40: {os.getenv('CHAT_ID_40')}")
 
     while True:
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Fiyatlar çekiliyor...")
