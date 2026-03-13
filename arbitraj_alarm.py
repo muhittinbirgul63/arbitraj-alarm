@@ -417,7 +417,7 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
             if ask and bid:
                 ask_tl = ask * kur
                 gercek_fark = ((bid - ask_tl) / ask_tl) * 100
-                if gercek_fark < 0.6:
+                if gercek_fark < 0.3:
                     print(f"[DOĞRULAMA BAŞARISIZ] {coin} {borsa_usdt}→{borsa_tl} market:%{fark:.2f} gerçek:%{gercek_fark:.2f}")
                     return
                 bildirim_gonder(
@@ -452,7 +452,7 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
             if ask and bid:
                 ask_usdt = ask / kur
                 gercek_fark = ((bid - ask_usdt) / ask_usdt) * 100
-                if gercek_fark < 0.6:
+                if gercek_fark < 0.3:
                     print(f"[DOĞRULAMA BAŞARISIZ] {coin} {borsa_tl}→{borsa_usdt} market:%{fark:.2f} gerçek:%{gercek_fark:.2f}")
                     return
                 bildirim_gonder(
