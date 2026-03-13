@@ -42,11 +42,15 @@ def telegram_gonder(chat_id, mesaj):
 def binance_tumfiyatlar():
     try:
         r = requests.get("https://api.binance.com/api/v3/ticker/price", timeout=10)
+        veri = r.json()
         sonuc = {}
-        for item in r.json():
-            if item["symbol"].endswith("USDT"):
-                coin = item["symbol"][:-4]
-                sonuc[coin] = float(item["price"])
+        if isinstance(veri, list):
+            for item in veri:
+                if isinstance(item, dict) and item.get("symbol", "").endswith("USDT"):
+                    coin = item["symbol"][:-4]
+                    try:
+                        sonuc[coin] = float(item["price"])
+                    except: pass
         return sonuc
     except Exception as e:
         print(f"Binance hata: {e}")
@@ -99,12 +103,17 @@ def okx_tumfiyatlar():
 def bybit_tumfiyatlar():
     try:
         r = requests.get("https://api.bybit.com/v5/market/tickers",
-                         params={"category": "spot"}, timeout=10)
+                         params={"category": "spot"}, timeout=15)
         sonuc = {}
-        for item in r.json().get("result", {}).get("list", []):
-            if item["symbol"].endswith("USDT"):
+        liste = r.json().get("result", {}).get("list", [])
+        for item in liste:
+            if isinstance(item, dict) and item.get("symbol", "").endswith("USDT"):
                 coin = item["symbol"][:-4]
-                sonuc[coin] = float(item["lastPrice"])
+                try:
+                    fiyat = float(item.get("lastPrice", 0))
+                    if fiyat > 0:
+                        sonuc[coin] = fiyat
+                except: pass
         return sonuc
     except Exception as e:
         print(f"Bybit hata: {e}")
@@ -113,14 +122,21 @@ def bybit_tumfiyatlar():
 
 def paribu_tumfiyatlar():
     try:
-        r = requests.get("https://api.paribu.com/ticker", timeout=10)
+        # Paribu v1 ticker endpoint
+        r = requests.get("https://www.paribu.com/ticker", timeout=10)
+        if r.status_code != 200:
+            raise Exception(f"HTTP {r.status_code}")
         sonuc = {}
-        for parite, veri in r.json().items():
-            if parite.endswith("_tl"):
-                coin = parite[:-3].upper()
-                fiyat = float(veri.get("last", 0))
-                if fiyat > 0:
-                    sonuc[coin] = fiyat
+        veri = r.json()
+        if isinstance(veri, dict):
+            for parite, bilgi in veri.items():
+                if parite.endswith("_tl") or parite.endswith("TL"):
+                    coin = parite.replace("_tl","").replace("TL","").upper()
+                    try:
+                        fiyat = float(bilgi.get("last", bilgi.get("high", 0)))
+                        if fiyat > 0:
+                            sonuc[coin] = fiyat
+                    except: pass
         return sonuc
     except Exception as e:
         print(f"Paribu hata: {e}")
