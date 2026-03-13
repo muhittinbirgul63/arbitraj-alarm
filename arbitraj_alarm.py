@@ -229,9 +229,14 @@ def karsilastir(coin, usdt_fiyat, tl_fiyat, borsa_usdt, borsa_tl, kur):
 
 def bot_calistir():
     print("Bot başlatılıyor...")
-    print(f"CHAT_ID_06: {os.getenv('CHAT_ID_06')}")
-    print(f"CHAT_ID_15: {os.getenv('CHAT_ID_15')}")
-    print(f"CHAT_ID_40: {os.getenv('CHAT_ID_40')}")
+    cid_06 = os.getenv("CHAT_ID_06")
+    cid_15 = os.getenv("CHAT_ID_15", cid_06)
+    cid_40 = os.getenv("CHAT_ID_40", cid_06)
+    print(f"CHAT_ID_06: {cid_06}")
+    print(f"CHAT_ID_15: {cid_15}")
+    print(f"CHAT_ID_40: {cid_40}")
+    telegram_gonder(cid_15, "🟠 Test - %1.5 kanalı çalışıyor mu?")
+    telegram_gonder(cid_40, "🔴 Test - %4 kanalı çalışıyor mu?")
 
     while True:
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Fiyatlar çekiliyor...")
