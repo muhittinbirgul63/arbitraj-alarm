@@ -80,9 +80,11 @@ def fiyat_formatla(fiyat):
     elif fiyat >= 1:
         return f"{fiyat:.4f}"
     elif fiyat >= 0.01:
+        return f"{fiyat:.4f}"
+    elif fiyat >= 0.001:
         return f"{fiyat:.5f}"
     else:
-        return f"{fiyat:.7f}"
+        return f"{fiyat:.6f}"
 
 
 def binance_tumfiyatlar():
@@ -320,7 +322,7 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
         bildirim_gonder(
             coin, borsa_usdt, borsa_tl,
             f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_tl)})",
-            f"₺{fiyat_formatla(tl_fiyat)}",
+            f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_fiyat/kur)})",
             fark, min_hacim, kur
         )
 
@@ -333,7 +335,7 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
         bildirim_gonder(
             coin, borsa_tl, borsa_usdt,
             f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_usdt)})",
-            f"${fiyat_formatla(usdt_fiyat)}",
+            f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_fiyat*kur)})",
             fark, min_hacim, kur
         )
 
@@ -362,7 +364,7 @@ def bot_calistir():
         kur = usdt_tl_kuru(paribu, btcturk)
         if not kur:
             print("USDT/TL kuru alınamadı, bekleniyor...")
-            time.sleep(10)
+            time.sleep(5)
             continue
 
         print(f"USDT/TL: {kur:.2f} | Paribu: {len(paribu)} | BTCTürk: {len(btcturk)} coin")
@@ -409,7 +411,7 @@ def bot_calistir():
                                            fark, min_hacim, kur)
 
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Tur tamamlandı, 10s bekleniyor...")
-        time.sleep(10)
+        time.sleep(5)
 
 
 if __name__ == "__main__":
