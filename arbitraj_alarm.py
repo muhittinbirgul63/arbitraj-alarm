@@ -68,6 +68,8 @@ def gate_tumfiyatlar():
         for item in r.json():
             if item["currency_pair"].endswith("_USDT") and float(item.get("last", 0)) > 0:
                 coin = item["currency_pair"][:-5]
+                if coin in GATE_HARIC:
+                    continue
                 sonuc[coin] = float(item["last"])
         return sonuc
     except Exception as e:
@@ -75,8 +77,9 @@ def gate_tumfiyatlar():
         return {}
 
 
-# MEXC'te farklı token olan coinler
+# Borsalarda farklı token olan coinler
 MEXC_HARIC = {"FB"}
+GATE_HARIC = {"FB"}
 
 def mexc_tumfiyatlar():
     try:
