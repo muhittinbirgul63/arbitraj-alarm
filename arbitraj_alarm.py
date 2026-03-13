@@ -234,6 +234,92 @@ def btcturk_tumfiyatlar():
         return {}
 
 
+def orderbook_ask(borsa, coin):
+    """Borsadan en iyi ask (satış) fiyatını al - biz buradan alacağız"""
+    try:
+        if borsa == "Binance":
+            r = requests.get(f"https://api.binance.com/api/v3/ticker/bookTicker",
+                           params={"symbol": f"{coin}USDT"}, timeout=5)
+            return float(r.json()["askPrice"])
+        elif borsa == "Gate":
+            r = requests.get(f"https://api.gateio.ws/api/v4/spot/order_book",
+                           params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
+            return float(r.json()["asks"][0][0])
+        elif borsa == "MEXC":
+            r = requests.get(f"https://api.mexc.com/api/v3/ticker/bookTicker",
+                           params={"symbol": f"{coin}USDT"}, timeout=5)
+            return float(r.json()["askPrice"])
+        elif borsa == "OKX":
+            r = requests.get(f"https://www.okx.com/api/v5/market/ticker",
+                           params={"instId": f"{coin}-USDT"}, timeout=5)
+            return float(r.json()["data"][0]["askPx"])
+    except: pass
+    return None
+
+
+def orderbook_bid(borsa, coin):
+    """Borsadan en iyi bid (alış) fiyatını al - biz buraya satacağız"""
+    try:
+        if borsa == "Binance":
+            r = requests.get(f"https://api.binance.com/api/v3/ticker/bookTicker",
+                           params={"symbol": f"{coin}USDT"}, timeout=5)
+            return float(r.json()["bidPrice"])
+        elif borsa == "Gate":
+            r = requests.get(f"https://api.gateio.ws/api/v4/spot/order_book",
+                           params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
+            return float(r.json()["bids"][0][0])
+        elif borsa == "MEXC":
+            r = requests.get(f"https://api.mexc.com/api/v3/ticker/bookTicker",
+                           params={"symbol": f"{coin}USDT"}, timeout=5)
+            return float(r.json()["bidPrice"])
+        elif borsa == "OKX":
+            r = requests.get(f"https://www.okx.com/api/v5/market/ticker",
+                           params={"instId": f"{coin}-USDT"}, timeout=5)
+            return float(r.json()["data"][0]["bidPx"])
+    except: pass
+    return None
+
+
+def paribu_bid(coin):
+    """Paribu alış tahtası en iyi fiyat"""
+    try:
+        r = requests.get(f"https://api.paribu.com/orderbook",
+                        params={"market": f"{coin.lower()}_tl", "depth": 1}, timeout=5)
+        return float(r.json()["bids"][0][0])
+    except: pass
+    return None
+
+
+def paribu_ask(coin):
+    """Paribu satış tahtası en iyi fiyat"""
+    try:
+        r = requests.get(f"https://api.paribu.com/orderbook",
+                        params={"market": f"{coin.lower()}_tl", "depth": 1}, timeout=5)
+        return float(r.json()["asks"][0][0])
+    except: pass
+    return None
+
+
+def btcturk_bid(coin):
+    """BTCTürk alış tahtası en iyi fiyat"""
+    try:
+        r = requests.get(f"https://api.btcturk.com/api/v2/orderbook",
+                        params={"pairSymbol": f"{coin}TRY"}, timeout=5)
+        return float(r.json()["data"]["bids"][0][0])
+    except: pass
+    return None
+
+
+def btcturk_ask(coin):
+    """BTCTürk satış tahtası en iyi fiyat"""
+    try:
+        r = requests.get(f"https://api.btcturk.com/api/v2/orderbook",
+                        params={"pairSymbol": f"{coin}TRY"}, timeout=5)
+        return float(r.json()["data"]["asks"][0][0])
+    except: pass
+    return None
+
+
 def usdt_tl_kuru(paribu, btcturk):
     kurlar = []
     if "USDT" in paribu:
@@ -314,30 +400,74 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
     min_hacim  = min(usdt_hacim, tl_hacim)
 
     usdt_tl = usdt_fiyat * kur
+
+    # Yabancıdan al → TL'de sat
     if tl_fiyat > usdt_tl:
         fark = ((tl_fiyat - usdt_tl) / usdt_tl) * 100
         if fark > 50:
             print(f"[ATLA] {coin} {borsa_usdt}→{borsa_tl} %{fark:.1f}")
             return
-        bildirim_gonder(
-            coin, borsa_usdt, borsa_tl,
-            f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_tl)})",
-            f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_fiyat/kur)})",
-            fark, min_hacim, kur
-        )
+        if fark >= 0.6:
+            # Orderbook ile doğrula
+            ask = orderbook_ask(borsa_usdt, coin)  # biz bu fiyattan alacağız
+            if borsa_tl == "Paribu":
+                bid = paribu_bid(coin)
+            else:
+                bid = btcturk_bid(coin)
+            if ask and bid:
+                ask_tl = ask * kur
+                gercek_fark = ((bid - ask_tl) / ask_tl) * 100
+                if gercek_fark < 0.6:
+                    print(f"[DOĞRULAMA BAŞARISIZ] {coin} {borsa_usdt}→{borsa_tl} market:%{fark:.2f} gerçek:%{gercek_fark:.2f}")
+                    return
+                bildirim_gonder(
+                    coin, borsa_usdt, borsa_tl,
+                    f"${fiyat_formatla(ask)} (≈₺{fiyat_formatla(ask_tl)})",
+                    f"₺{fiyat_formatla(bid)} (≈${fiyat_formatla(bid/kur)})",
+                    gercek_fark, min_hacim, kur
+                )
+            else:
+                # Orderbook alınamazsa market fiyatıyla devam et
+                bildirim_gonder(
+                    coin, borsa_usdt, borsa_tl,
+                    f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_tl)})",
+                    f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_fiyat/kur)})",
+                    fark, min_hacim, kur
+                )
 
+    # TL'den al → Yabancıda sat
     tl_usdt = tl_fiyat / kur
     if usdt_fiyat > tl_usdt:
         fark = ((usdt_fiyat - tl_usdt) / tl_usdt) * 100
         if fark > 50:
             print(f"[ATLA] {coin} {borsa_tl}→{borsa_usdt} %{fark:.1f}")
             return
-        bildirim_gonder(
-            coin, borsa_tl, borsa_usdt,
-            f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_usdt)})",
-            f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_fiyat*kur)})",
-            fark, min_hacim, kur
-        )
+        if fark >= 0.6:
+            # Orderbook ile doğrula
+            if borsa_tl == "Paribu":
+                ask = paribu_ask(coin)
+            else:
+                ask = btcturk_ask(coin)
+            bid = orderbook_bid(borsa_usdt, coin)  # biz bu fiyattan satacağız
+            if ask and bid:
+                ask_usdt = ask / kur
+                gercek_fark = ((bid - ask_usdt) / ask_usdt) * 100
+                if gercek_fark < 0.6:
+                    print(f"[DOĞRULAMA BAŞARISIZ] {coin} {borsa_tl}→{borsa_usdt} market:%{fark:.2f} gerçek:%{gercek_fark:.2f}")
+                    return
+                bildirim_gonder(
+                    coin, borsa_tl, borsa_usdt,
+                    f"₺{fiyat_formatla(ask)} (≈${fiyat_formatla(ask_usdt)})",
+                    f"${fiyat_formatla(bid)} (≈₺{fiyat_formatla(bid*kur)})",
+                    gercek_fark, min_hacim, kur
+                )
+            else:
+                bildirim_gonder(
+                    coin, borsa_tl, borsa_usdt,
+                    f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_usdt)})",
+                    f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_fiyat*kur)})",
+                    fark, min_hacim, kur
+                )
 
 
 def bot_calistir():
