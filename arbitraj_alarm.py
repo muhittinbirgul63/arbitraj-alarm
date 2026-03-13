@@ -400,74 +400,30 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
     min_hacim  = min(usdt_hacim, tl_hacim)
 
     usdt_tl = usdt_fiyat * kur
-
-    # Yabancıdan al → TL'de sat
     if tl_fiyat > usdt_tl:
         fark = ((tl_fiyat - usdt_tl) / usdt_tl) * 100
         if fark > 50:
             print(f"[ATLA] {coin} {borsa_usdt}→{borsa_tl} %{fark:.1f}")
             return
-        if fark >= 0.6:
-            # Orderbook ile doğrula
-            ask = orderbook_ask(borsa_usdt, coin)  # biz bu fiyattan alacağız
-            if borsa_tl == "Paribu":
-                bid = paribu_bid(coin)
-            else:
-                bid = btcturk_bid(coin)
-            if ask and bid:
-                ask_tl = ask * kur
-                gercek_fark = ((bid - ask_tl) / ask_tl) * 100
-                if gercek_fark <= 0:
-                    print(f"[DOĞRULAMA BAŞARISIZ] {coin} {borsa_usdt}→{borsa_tl} market:%{fark:.2f} gerçek:%{gercek_fark:.2f}")
-                    return
-                bildirim_gonder(
-                    coin, borsa_usdt, borsa_tl,
-                    f"${fiyat_formatla(ask)} (≈₺{fiyat_formatla(ask_tl)})",
-                    f"₺{fiyat_formatla(bid)} (≈${fiyat_formatla(bid/kur)})",
-                    gercek_fark, min_hacim, kur
-                )
-            else:
-                # Orderbook alınamazsa market fiyatıyla devam et
-                bildirim_gonder(
-                    coin, borsa_usdt, borsa_tl,
-                    f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_tl)})",
-                    f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_fiyat/kur)})",
-                    fark, min_hacim, kur
-                )
+        bildirim_gonder(
+            coin, borsa_usdt, borsa_tl,
+            f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_tl)})",
+            f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_fiyat/kur)})",
+            fark, min_hacim, kur
+        )
 
-    # TL'den al → Yabancıda sat
     tl_usdt = tl_fiyat / kur
     if usdt_fiyat > tl_usdt:
         fark = ((usdt_fiyat - tl_usdt) / tl_usdt) * 100
         if fark > 50:
             print(f"[ATLA] {coin} {borsa_tl}→{borsa_usdt} %{fark:.1f}")
             return
-        if fark >= 0.6:
-            # Orderbook ile doğrula
-            if borsa_tl == "Paribu":
-                ask = paribu_ask(coin)
-            else:
-                ask = btcturk_ask(coin)
-            bid = orderbook_bid(borsa_usdt, coin)  # biz bu fiyattan satacağız
-            if ask and bid:
-                ask_usdt = ask / kur
-                gercek_fark = ((bid - ask_usdt) / ask_usdt) * 100
-                if gercek_fark <= 0:
-                    print(f"[DOĞRULAMA BAŞARISIZ] {coin} {borsa_tl}→{borsa_usdt} market:%{fark:.2f} gerçek:%{gercek_fark:.2f}")
-                    return
-                bildirim_gonder(
-                    coin, borsa_tl, borsa_usdt,
-                    f"₺{fiyat_formatla(ask)} (≈${fiyat_formatla(ask_usdt)})",
-                    f"${fiyat_formatla(bid)} (≈₺{fiyat_formatla(bid*kur)})",
-                    gercek_fark, min_hacim, kur
-                )
-            else:
-                bildirim_gonder(
-                    coin, borsa_tl, borsa_usdt,
-                    f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_usdt)})",
-                    f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_fiyat*kur)})",
-                    fark, min_hacim, kur
-                )
+        bildirim_gonder(
+            coin, borsa_tl, borsa_usdt,
+            f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_usdt)})",
+            f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_fiyat*kur)})",
+            fark, min_hacim, kur
+        )
 
 
 def bot_calistir():
