@@ -75,6 +75,9 @@ def gate_tumfiyatlar():
         return {}
 
 
+# MEXC'te farklı token olan coinler
+MEXC_HARIC = {"FB"}
+
 def mexc_tumfiyatlar():
     try:
         r = requests.get("https://api.mexc.com/api/v3/ticker/price", timeout=10)
@@ -82,6 +85,8 @@ def mexc_tumfiyatlar():
         for item in r.json():
             if item["symbol"].endswith("USDT"):
                 coin = item["symbol"][:-4]
+                if coin in MEXC_HARIC:
+                    continue
                 sonuc[coin] = float(item["price"])
         return sonuc
     except Exception as e:
@@ -291,7 +296,7 @@ def bot_calistir():
                                        f"₺{p_fiyat:.4f}", f"₺{b_fiyat:.4f}", fark, "🇹🇷↔🇹🇷")
 
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Tur tamamlandı, 60s bekleniyor...")
-        time.sleep(60)
+        time.sleep(10)
 
 
 if __name__ == "__main__":
