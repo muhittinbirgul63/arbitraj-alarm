@@ -18,11 +18,15 @@ CHAT_ID_06     = os.getenv("CHAT_ID_06")
 CHAT_ID_15     = os.getenv("CHAT_ID_15", os.getenv("CHAT_ID_06"))
 CHAT_ID_40     = os.getenv("CHAT_ID_40", os.getenv("CHAT_ID_06"))
 
-GRUPLAR = [
-    (4.0, "🔴", "BÜYÜK FIRSAT",  CHAT_ID_40, 120),
-    (1.5, "🟠", "İYİ FIRSAT",    CHAT_ID_15, 180),
-    (0.6, "🟡", "KÜÇÜK FIRSAT",  CHAT_ID_06, 300),
-]
+def get_gruplar():
+    cid_06 = os.getenv("CHAT_ID_06")
+    cid_15 = os.getenv("CHAT_ID_15", cid_06)
+    cid_40 = os.getenv("CHAT_ID_40", cid_06)
+    return [
+        (4.0, "🔴", "BÜYÜK FIRSAT",  cid_40, 120),
+        (1.5, "🟠", "İYİ FIRSAT",    cid_15, 180),
+        (0.6, "🟡", "KÜÇÜK FIRSAT",  cid_06, 300),
+    ]
 
 son_bildirim = {}
 
@@ -102,8 +106,10 @@ def okx_tumfiyatlar():
 
 def bybit_tumfiyatlar():
     try:
+        headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get("https://api.bybit.com/v5/market/tickers",
-                         params={"category": "spot"}, timeout=15)
+                         params={"category": "spot"}, headers=headers, timeout=15)
+        r.raise_for_status()
         sonuc = {}
         liste = r.json().get("result", {}).get("list", [])
         for item in liste:
@@ -114,6 +120,7 @@ def bybit_tumfiyatlar():
                     if fiyat > 0:
                         sonuc[coin] = fiyat
                 except: pass
+        print(f"Bybit: {len(sonuc)} coin")
         return sonuc
     except Exception as e:
         print(f"Bybit hata: {e}")
@@ -169,7 +176,7 @@ def usdt_tl_kuru(paribu_tl, btcturk_tl):
 
 
 def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark_yuzde, yon):
-    for esik, emoji, etiket, chat_id, bekleme in GRUPLAR:
+    for esik, emoji, etiket, chat_id, bekleme in get_gruplar():
         if fark_yuzde >= esik:
             anahtar = f"{coin}_{al_borsa}_{sat_borsa}_{etiket}"
             son = son_bildirim.get(anahtar, 0)
@@ -196,6 +203,9 @@ def karsilastir(coin, usdt_fiyat, tl_fiyat, borsa_usdt, borsa_tl, kur):
     usdt_tl = usdt_fiyat * kur
     if tl_fiyat > usdt_tl:
         fark = ((tl_fiyat - usdt_tl) / usdt_tl) * 100
+        if fark > 50:
+            print(f"[ATLA] {coin} {borsa_usdt}→{borsa_tl} %{fark:.1f} (muhtemelen farklı token)")
+            return
         bildirim_gonder(
             coin, borsa_usdt, borsa_tl,
             f"${usdt_fiyat:.6f} (≈₺{usdt_tl:.4f})",
@@ -206,6 +216,9 @@ def karsilastir(coin, usdt_fiyat, tl_fiyat, borsa_usdt, borsa_tl, kur):
     tl_usdt = tl_fiyat / kur
     if usdt_fiyat > tl_usdt:
         fark = ((usdt_fiyat - tl_usdt) / tl_usdt) * 100
+        if fark > 50:
+            print(f"[ATLA] {coin} {borsa_tl}→{borsa_usdt} %{fark:.1f} (muhtemelen farklı token)")
+            return
         bildirim_gonder(
             coin, borsa_tl, borsa_usdt,
             f"₺{tl_fiyat:.4f} (≈${tl_usdt:.6f})",
