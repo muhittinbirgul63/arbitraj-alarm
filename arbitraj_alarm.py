@@ -280,14 +280,18 @@ def orderbook_bid(borsa, coin):
     return None
 
 
+_paribu_debug_yapildi = False
+
 def paribu_bid(coin):
     """Paribu alış tahtası en iyi fiyat"""
+    global _paribu_debug_yapildi
     try:
         r = requests.get(f"https://api.paribu.com/orderbook",
                         params={"market": f"{coin.lower()}_tl", "depth": 1}, timeout=5)
         veri = r.json()
-        if coin == "BTC":
-            print(f"Paribu orderbook örnek: {str(veri)[:300]}")
+        if not _paribu_debug_yapildi:
+            print(f"Paribu orderbook örnek ({coin}): {str(veri)[:400]}")
+            _paribu_debug_yapildi = True
         bids = veri.get("bids", [])
         if bids:
             ilk = bids[0]
@@ -320,14 +324,18 @@ def paribu_ask(coin):
     return None
 
 
+_btcturk_debug_yapildi = False
+
 def btcturk_bid(coin):
     """BTCTürk alış tahtası en iyi fiyat"""
+    global _btcturk_debug_yapildi
     try:
         r = requests.get(f"https://api.btcturk.com/api/v2/orderbook",
                         params={"pairSymbol": f"{coin}TRY"}, timeout=5)
         veri = r.json()
-        if coin == "BTC":
-            print(f"BTCTürk orderbook örnek: {str(veri)[:300]}")
+        if not _btcturk_debug_yapildi:
+            print(f"BTCTürk orderbook örnek ({coin}): {str(veri)[:400]}")
+            _btcturk_debug_yapildi = True
         bids = veri.get("data", {}).get("bids", [])
         if bids:
             ilk = bids[0]
