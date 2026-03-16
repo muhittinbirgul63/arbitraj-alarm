@@ -470,7 +470,7 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
                         gercek_fark, min_hacim, kur
                     )
                 else:
-                    print(f"[ORDERBOOK NEGATİF] {coin} {borsa_usdt}→{borsa_tl} market:%{fark:.2f} gerçek:%{gercek_fark:.2f}")
+                    pass  # gerçek fark negatif, sessizce atla
             else:
                 # Orderbook alınamazsa market fiyatıyla devam
                 bildirim_gonder(
@@ -504,7 +504,7 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
                         gercek_fark, min_hacim, kur
                     )
                 else:
-                    print(f"[ORDERBOOK NEGATİF] {coin} {borsa_tl}→{borsa_usdt} market:%{fark:.2f} gerçek:%{gercek_fark:.2f}")
+                    pass  # gerçek fark negatif, sessizce atla
             else:
                 bildirim_gonder(
                     coin, borsa_tl, borsa_usdt,
