@@ -22,7 +22,7 @@ MEXC_HARIC    = {"FB"}
 GATE_HARIC    = {"FB"}
 BINANCE_HARIC = set()
 OKX_HARIC     = set()
-KUCOIN_HARIC  = set()
+KUCOIN_HARIC  = {"FB"}
 
 # Minimum 24s hacim (USDT)
 MIN_HACIM_USDT = 100_000
@@ -122,9 +122,8 @@ def binance_tumfiyatlar():
                     if fiyat > 0:
                         sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
                 except: pass
-        if sonuc:
-            print(f"Binance: {len(sonuc)} coin")
-            borsa_hata_kontrol("Binance", True)
+        print(f"Binance: {len(sonuc)} coin")
+        borsa_hata_kontrol("Binance", True)
         return sonuc
     except Exception as e:
         print(f"Binance hata: {e}")
