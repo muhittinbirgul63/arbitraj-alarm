@@ -243,9 +243,11 @@ def paribu_tumfiyatlar():
                     coin = parite.replace("_tl","").replace("TL","").upper()
                     try:
                         fiyat = float(bilgi.get("last", 0))
+                        ask   = float(bilgi.get("lowestAsk", fiyat))
+                        bid   = float(bilgi.get("highestBid", fiyat))
                         hacim = float(bilgi.get("volume", 0)) * fiyat
                         if fiyat > 0:
-                            sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
+                            sonuc[coin] = {"fiyat": fiyat, "ask": ask, "bid": bid, "hacim": hacim}
                     except: pass
         borsa_hata_kontrol("Paribu", True)
         return sonuc
@@ -265,15 +267,17 @@ def btcturk_tumfiyatlar():
                 coin = item["pair"][:-3]
                 try:
                     fiyat = float(item.get("last", 0))
+                    ask   = float(item.get("ask", fiyat))
+                    bid   = float(item.get("bid", fiyat))
                     hacim = float(item.get("volume", 0)) * fiyat
                     if fiyat > 0:
-                        sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
+                        sonuc[coin] = {"fiyat": fiyat, "ask": ask, "bid": bid, "hacim": hacim}
                 except: pass
-        borsa_hata_kontrol("BTCTürk", True)
+        borsa_hata_kontrol("BTCTurk", True)
         return sonuc
     except Exception as e:
-        print(f"BTCTürk hata: {e}")
-        borsa_hata_kontrol("BTCTürk", False)
+        print(f"BTCTurk hata: {e}")
+        borsa_hata_kontrol("BTCTurk", False)
         return {}
 
 
@@ -480,54 +484,55 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
     usdt_tl = usdt_fiyat * kur
 
     # Yabancıdan al → TL'de sat
-    if tl_fiyat > usdt_tl:
-        fark = ((tl_fiyat - usdt_tl) / usdt_tl) * 100
+    # Biz yabancıdan ask fiyatından alacağız, TL borsasında bid fiyatından satacağız
+    tl_bid = tl_veri.get("bid", tl_fiyat)  # BTCTürk/Paribu bid
+    if tl_bid > usdt_tl:
+        fark = ((tl_bid - usdt_tl) / usdt_tl) * 100
         if fark > 50:
             return
         if fark >= 0.6:
             ask = orderbook_ask(borsa_usdt, coin)
-            bid = paribu_bid(coin) if borsa_tl == "Paribu" else btcturk_bid(coin)
-            if ask and bid and ask > 0 and bid > 0:
+            if ask and ask > 0:
                 ask_tl = ask * kur
-                gercek_fark = ((bid - ask_tl) / ask_tl) * 100
+                gercek_fark = ((tl_bid - ask_tl) / ask_tl) * 100
                 if gercek_fark > 0:
                     bildirim_gonder(
                         coin, borsa_usdt, borsa_tl,
                         f"${fiyat_formatla(ask)} (≈₺{fiyat_formatla(ask_tl)})",
-                        f"₺{fiyat_formatla(bid)} (≈${fiyat_formatla(bid/kur)})",
+                        f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
                         gercek_fark, min_hacim, kur
                     )
             else:
                 bildirim_gonder(
                     coin, borsa_usdt, borsa_tl,
                     f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_tl)})",
-                    f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_fiyat/kur)})",
+                    f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
                     fark, min_hacim, kur
                 )
 
     # TL'den al → Yabancıda sat
-    tl_usdt = tl_fiyat / kur
-    if usdt_fiyat > tl_usdt:
-        fark = ((usdt_fiyat - tl_usdt) / tl_usdt) * 100
+    # Biz TL borsasından ask fiyatından alacağız, yabancıda bid fiyatından satacağız
+    tl_ask = tl_veri.get("ask", tl_fiyat)  # BTCTürk/Paribu ask
+    tl_ask_usdt = tl_ask / kur
+    if usdt_fiyat > tl_ask_usdt:
+        fark = ((usdt_fiyat - tl_ask_usdt) / tl_ask_usdt) * 100
         if fark > 50:
             return
         if fark >= 0.6:
-            ask = paribu_ask(coin) if borsa_tl == "Paribu" else btcturk_ask(coin)
             bid = orderbook_bid(borsa_usdt, coin)
-            if ask and bid and ask > 0 and bid > 0:
-                ask_usdt = ask / kur
-                gercek_fark = ((bid - ask_usdt) / ask_usdt) * 100
+            if bid and bid > 0:
+                gercek_fark = ((bid - tl_ask_usdt) / tl_ask_usdt) * 100
                 if gercek_fark > 0:
                     bildirim_gonder(
                         coin, borsa_tl, borsa_usdt,
-                        f"₺{fiyat_formatla(ask)} (≈${fiyat_formatla(ask_usdt)})",
+                        f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
                         f"${fiyat_formatla(bid)} (≈₺{fiyat_formatla(bid*kur)})",
                         gercek_fark, min_hacim, kur
                     )
             else:
                 bildirim_gonder(
                     coin, borsa_tl, borsa_usdt,
-                    f"₺{fiyat_formatla(tl_fiyat)} (≈${fiyat_formatla(tl_usdt)})",
+                    f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
                     f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_fiyat*kur)})",
                     fark, min_hacim, kur
                 )
