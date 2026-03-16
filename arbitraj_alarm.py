@@ -112,8 +112,16 @@ def binance_tek_fiyat(coin):
         r = requests.get("https://api.binance.com/api/v3/ticker/price",
                         params={"symbol": f"{coin}USDT"}, timeout=5)
         if r.status_code == 200:
-            return float(r.json()["price"])
-    except: pass
+            fiyat = float(r.json()["price"])
+            return fiyat
+        else:
+            if not hasattr(binance_tek_fiyat, "_hata_log"):
+                binance_tek_fiyat._hata_log = True
+                print(f"Binance HTTP {r.status_code}: {r.text[:100]}")
+    except Exception as e:
+        if not hasattr(binance_tek_fiyat, "_exc_log"):
+            binance_tek_fiyat._exc_log = True
+            print(f"Binance exception: {e}")
     return None
 
 
