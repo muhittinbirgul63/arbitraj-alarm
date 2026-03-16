@@ -173,25 +173,41 @@ def okx_tumfiyatlar():
 
 
 def bybit_tumfiyatlar():
-    try:
-        r = requests.get("https://api.bybit.com/spot/quote/v1/ticker/24hr", timeout=10)
-        sonuc = {}
-        for item in r.json().get("result", []):
-            sym = item.get("symbol", "")
-            if sym.endswith("USDT"):
-                coin = sym[:-4]
-                try:
-                    fiyat = float(item.get("lastPrice", 0))
-                    hacim = float(item.get("quoteVolume", 0))
-                    if fiyat > 0:
-                        sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
-                except: pass
-        if sonuc:
-            print(f"Bybit: {len(sonuc)} coin")
-        return sonuc
-    except Exception as e:
-        print(f"Bybit hata: {e}")
-        return {}
+    endpoints = [
+        "https://api.bybit.com/v5/market/tickers?category=spot",
+        "https://api.bybit.com/spot/v3/public/quote/ticker/24hr",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+    for url in endpoints:
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code != 200:
+                continue
+            veri = r.json()
+            sonuc = {}
+            # v5 formatı
+            liste = veri.get("result", {}).get("list", veri.get("result", []))
+            if isinstance(liste, list):
+                for item in liste:
+                    if not isinstance(item, dict): continue
+                    sym = item.get("symbol", "")
+                    if sym.endswith("USDT"):
+                        coin = sym[:-4]
+                        try:
+                            fiyat = float(item.get("lastPrice", item.get("last_price", 0)))
+                            hacim = float(item.get("quoteVolume", item.get("quote_volume", item.get("turnover24h", 0))))
+                            if fiyat > 0:
+                                sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
+                        except: pass
+            if sonuc:
+                print(f"Bybit: {len(sonuc)} coin")
+                return sonuc
+        except Exception as e:
+            print(f"Bybit hata ({url[-30:]}): {e}")
+    return {}
 
 
 def paribu_tumfiyatlar():
@@ -531,7 +547,7 @@ def bot_calistir():
         gate    = gate_tumfiyatlar()
         mexc    = mexc_tumfiyatlar()
         okx     = okx_tumfiyatlar()
-        bybit   = bybit_tumfiyatlar()
+        bybit   = {}  # Bybit Railway IP engelliyor
         paribu  = paribu_tumfiyatlar()
         btcturk = btcturk_tumfiyatlar()
 
