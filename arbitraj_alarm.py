@@ -107,28 +107,43 @@ def fiyat_formatla(fiyat):
 # ─── BORSA FİYAT FONKSİYONLARI ───────────────────────────────────────────────
 
 def binance_tumfiyatlar():
-    try:
-        r = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15)
-        r.raise_for_status()
-        sonuc = {}
-        for item in r.json():
-            if not isinstance(item, dict): continue
-            sym = item.get("symbol", "")
-            if sym.endswith("USDT"):
-                coin = sym[:-4]
-                if coin in BINANCE_HARIC: continue
-                try:
-                    fiyat = float(item["lastPrice"])
-                    hacim = float(item["quoteVolume"])
-                    if fiyat > 0:
-                        sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
-                except: pass
-        borsa_hata_kontrol("Binance", True)
-        return sonuc
-    except Exception as e:
-        print(f"Binance hata: {e}")
-        borsa_hata_kontrol("Binance", False)
-        return {}
+    endpoints = [
+        "https://api.binance.com/api/v3/ticker/24hr",
+        "https://api1.binance.com/api/v3/ticker/24hr",
+        "https://api2.binance.com/api/v3/ticker/24hr",
+        "https://api3.binance.com/api/v3/ticker/24hr",
+        "https://api4.binance.com/api/v3/ticker/24hr",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+    for url in endpoints:
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            r.raise_for_status()
+            sonuc = {}
+            for item in r.json():
+                if not isinstance(item, dict): continue
+                sym = item.get("symbol", "")
+                if sym.endswith("USDT"):
+                    coin = sym[:-4]
+                    if coin in BINANCE_HARIC: continue
+                    try:
+                        fiyat = float(item["lastPrice"])
+                        hacim = float(item["quoteVolume"])
+                        if fiyat > 0:
+                            sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
+                    except: pass
+            if sonuc:
+                print(f"Binance: {len(sonuc)} coin ({url.split('/')[2]})")
+                borsa_hata_kontrol("Binance", True)
+                return sonuc
+        except Exception as e:
+            print(f"Binance hata ({url.split('/')[2]}): {e}")
+            continue
+    borsa_hata_kontrol("Binance", False)
+    return {}
 
 
 def gate_tumfiyatlar():
@@ -280,9 +295,13 @@ def orderbook_ask(borsa, coin):
     """Yabancı borsadan en iyi ask fiyatı — biz buradan alacağız"""
     try:
         if borsa == "Binance":
-            r = requests.get("https://api.binance.com/api/v3/ticker/bookTicker",
-                           params={"symbol": f"{coin}USDT"}, timeout=5)
-            return float(r.json()["askPrice"])
+            for base in ["api","api1","api2","api3"]:
+                try:
+                    r = requests.get(f"https://{base}.binance.com/api/v3/ticker/bookTicker",
+                                   params={"symbol": f"{coin}USDT"}, timeout=5)
+                    if r.status_code == 200:
+                        return float(r.json()["askPrice"])
+                except: continue
         elif borsa == "Gate":
             r = requests.get("https://api.gateio.ws/api/v4/spot/order_book",
                            params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
@@ -307,9 +326,13 @@ def orderbook_bid(borsa, coin):
     """Yabancı borsadan en iyi bid fiyatı — biz buraya satacağız"""
     try:
         if borsa == "Binance":
-            r = requests.get("https://api.binance.com/api/v3/ticker/bookTicker",
-                           params={"symbol": f"{coin}USDT"}, timeout=5)
-            return float(r.json()["bidPrice"])
+            for base in ["api","api1","api2","api3"]:
+                try:
+                    r = requests.get(f"https://{base}.binance.com/api/v3/ticker/bookTicker",
+                                   params={"symbol": f"{coin}USDT"}, timeout=5)
+                    if r.status_code == 200:
+                        return float(r.json()["bidPrice"])
+                except: continue
         elif borsa == "Gate":
             r = requests.get("https://api.gateio.ws/api/v4/spot/order_book",
                            params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
