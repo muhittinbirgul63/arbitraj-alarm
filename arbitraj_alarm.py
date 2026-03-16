@@ -400,8 +400,6 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
             # Ban kontrolü
             if anahtar in coin_ban:
                 if simdi < coin_ban[anahtar]:
-                    kalan = int((coin_ban[anahtar] - simdi) / 60)
-                    print(f"[BAN] {coin} %{esik} - {kalan}dk kaldı")
                     break
                 else:
                     del coin_ban[anahtar]
