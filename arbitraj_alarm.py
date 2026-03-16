@@ -106,29 +106,32 @@ def fiyat_formatla(fiyat):
 
 # ─── BORSA FİYAT FONKSİYONLARI ───────────────────────────────────────────────
 
-def binance_tumfiyatlar():
+def binance_tek_fiyat(coin):
+    """Tek coin için Binance fiyatı al"""
     try:
-        r = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15)
-        sonuc = {}
-        for item in r.json():
-            if not isinstance(item, dict): continue
-            sym = item.get("symbol", "")
-            if sym.endswith("USDT"):
-                coin = sym[:-4]
-                if coin in BINANCE_HARIC: continue
-                try:
-                    fiyat = float(item["lastPrice"])
-                    hacim = float(item["quoteVolume"])
-                    if fiyat > 0:
-                        sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
-                except: pass
-        print(f"Binance: {len(sonuc)} coin")
-        borsa_hata_kontrol("Binance", True)
-        return sonuc
-    except Exception as e:
-        print(f"Binance hata: {e}")
-        borsa_hata_kontrol("Binance", False)
-        return {}
+        r = requests.get("https://api.binance.com/api/v3/ticker/price",
+                        params={"symbol": f"{coin}USDT"}, timeout=5)
+        if r.status_code == 200:
+            return float(r.json()["price"])
+    except: pass
+    return None
+
+
+def binance_tek_hacim(coin):
+    """Tek coin için Binance hacmi al"""
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/24hr",
+                        params={"symbol": f"{coin}USDT"}, timeout=5)
+        if r.status_code == 200:
+            return float(r.json()["quoteVolume"])
+    except: pass
+    return 0
+
+
+def binance_tumfiyatlar():
+    # Binance tek sorguda 451 veriyor, tl_coinler listesi sonradan doluyor
+    # Bu yüzden boş döndürüyoruz, karsilastir içinde coin bazlı sorgu atılacak
+    return {}
 
 
 def gate_tumfiyatlar():
@@ -622,6 +625,16 @@ def bot_calistir():
         }
 
         for coin in tl_coinler:
+            # Binance için coin bazlı sorgu
+            binance_fiyat = binance_tek_fiyat(coin)
+            if binance_fiyat and coin not in BINANCE_HARIC:
+                binance_hacim = binance_tek_hacim(coin)
+                binance_veri = {"fiyat": binance_fiyat, "hacim": binance_hacim}
+                if coin in paribu:
+                    karsilastir(coin, binance_veri, paribu[coin], "Binance", "Paribu", kur)
+                if coin in btcturk:
+                    karsilastir(coin, binance_veri, btcturk[coin], "Binance", "BTCTürk", kur)
+
             for borsa_usdt, fiyatlar_usdt in usdt_borsalar.items():
                 if coin not in fiyatlar_usdt:
                     continue
