@@ -625,7 +625,16 @@ def bot_calistir():
         }
 
         for coin in tl_coinler:
-            # Binance: Railway ABD IP'sini engelliyor (451), devre dışı
+            # Binance coin bazlı sorgu (EU bölgede çalışıyor)
+            if coin not in BINANCE_HARIC:
+                b_fiyat = binance_tek_fiyat(coin)
+                if b_fiyat and b_fiyat > 0:
+                    b_hacim = binance_tek_hacim(coin)
+                    b_veri = {"fiyat": b_fiyat, "hacim": b_hacim}
+                    if coin in paribu:
+                        karsilastir(coin, b_veri, paribu[coin], "Binance", "Paribu", kur)
+                    if coin in btcturk:
+                        karsilastir(coin, b_veri, btcturk[coin], "Binance", "BTCTürk", kur)
 
             for borsa_usdt, fiyatlar_usdt in usdt_borsalar.items():
                 if coin not in fiyatlar_usdt:
