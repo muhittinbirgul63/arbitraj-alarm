@@ -306,7 +306,7 @@ def paribu_bid(coin):
                         params={"market": f"{coin.lower()}_tl", "depth": 1}, timeout=5)
         veri = r.json()
         if not _paribu_debug_yapildi:
-            print(f"Paribu orderbook örnek ({coin}): {str(veri)[:400]}")
+            pass
             _paribu_debug_yapildi = True
         bids = veri.get("bids", [])
         if bids:
@@ -350,7 +350,7 @@ def btcturk_bid(coin):
                         params={"pairSymbol": f"{coin}TRY"}, timeout=5)
         veri = r.json()
         if not _btcturk_debug_yapildi:
-            print(f"BTCTürk orderbook örnek ({coin}): {str(veri)[:400]}")
+            pass
             _btcturk_debug_yapildi = True
         bids = veri.get("data", {}).get("bids", [])
         if bids:
