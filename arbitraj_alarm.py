@@ -162,9 +162,10 @@ def telegram_komutlari_isle():
             chat_id = str(mesaj.get("chat", {}).get("id", ""))
             metin = mesaj.get("text", "").strip()
 
-            print(f"[DEBUG] Mesaj geldi - chat_id: {chat_id}, ADMIN_ID: {ADMIN_ID}, metin: {metin[:30]}")
-            if chat_id != ADMIN_ID:
-                print(f"[DEBUG] Yetkisiz: {chat_id} != {ADMIN_ID}")
+            print(f"[DEBUG] Mesaj geldi - chat_id: {chat_id}, metin: {metin[:30]}")
+            izinli = [ADMIN_ID, os.getenv("CHAT_ID_06",""), os.getenv("CHAT_ID_15",""), os.getenv("CHAT_ID_40","")]
+            if chat_id not in izinli:
+                print(f"[DEBUG] Yetkisiz: {chat_id}")
                 continue
 
             if metin.startswith("/ban "):
