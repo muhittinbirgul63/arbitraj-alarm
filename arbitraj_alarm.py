@@ -2,21 +2,25 @@
 Kripto Arbitraj Alarm Botu v5
 - Binance, Gate, MEXC, OKX, KuCoin (USDT)
 - Paribu, BTCTürk (TL)
-- Orderbook doğrulama (tüm yönler)
+- Orderbook doğrulama
 - Kademeli ban sistemi
 - Hacim kontrolü
+- Telegram komutları: /ban /unban /banlist
+- Çekim/yatırma durum takibi
 """
 
 import requests
 import time
 import os
 import json
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+ADMIN_ID       = str(os.getenv("ADMIN_ID", "1072335473"))
 
 # Borsalarda farklı token olan coinler
 MEXC_HARIC    = {"FB"}
@@ -41,9 +45,9 @@ coin_sayac   = {}
 coin_ban     = {}
 ban_seviye   = {}
 
-BAN_SURELER = [600, 3600, 21600, 86400]  # 10dk, 1sa, 6sa, 24sa
+BAN_SURELER = [600, 3600, 21600, 86400]
 SPAM_LIMIT  = 30
-SPAM_SURE   = 600  # 10 dakika pencere
+SPAM_SURE   = 600
 
 # Grup emojileri
 GRUP_EMOJI = {
@@ -52,147 +56,20 @@ GRUP_EMOJI = {
     0.6: "📊",
 }
 
-# Manuel ban listesi (Telegram'dan /ban komutuyla eklenir)
-BAN_DOSYA = "/app/manuel_ban.json"
-
-def ban_yukle():
-    try:
-        if os.path.exists(BAN_DOSYA):
-            with open(BAN_DOSYA, "r") as f:
-                return set(json.load(f))
-    except: pass
-    return set()
-
-def ban_kaydet(ban_set):
-    try:
-        with open(BAN_DOSYA, "w") as f:
-            json.dump(list(ban_set), f)
-    except Exception as e:
-        print(f"Ban kayıt hata: {e}")
-
-MANUEL_BAN = ban_yukle()
-
-# Çekim/yatırma durum takibi
-onceki_durum = {}  # {borsa_coin: True/False}
-son_durum_kontrol = 0
-DURUM_KONTROL_SURESI = 30  # saniye
-
-# Yetkili kullanıcı ID
-ADMIN_ID = os.getenv("ADMIN_ID", "1072335473")
-
 # Hata sayaçları
 hata_sayac = {}
 HATA_LIMIT = 10
 
-# Telegram update offset
-update_offset = 0
+# Manuel ban listesi
+MANUEL_BAN = set()
+
+# Çekim/yatırma durum takibi
+onceki_durum = {}
+son_durum_kontrol = 0
+DURUM_KONTROL_SURESI = 30
 
 
-def paribu_durum_kontrol():
-    """Paribu status sayfasından çekim/yatırma durumunu çek"""
-    try:
-        r = requests.get("https://status.paribu.com/api/v2/components.json", timeout=10)
-        sonuc = {}
-        for item in r.json().get("components", []):
-            isim = item.get("name", "")
-            durum = item.get("status", "")  # operational, degraded_performance, partial_outage, major_outage
-            aktif = durum == "operational"
-            sonuc[f"Paribu_{isim}"] = {"aktif": aktif, "durum": durum, "isim": isim}
-        return sonuc
-    except Exception as e:
-        print(f"Paribu durum hata: {e}")
-        return {}
-
-
-def btcturk_durum_kontrol():
-    """BTCTürk exchangeinfo'dan çekim/yatırma durumunu çek"""
-    try:
-        r = requests.get("https://api.btcturk.com/api/v2/server/exchangeinfo", timeout=10)
-        sonuc = {}
-        for item in r.json().get("data", {}).get("currencies", []):
-            isim = item.get("name", "")
-            yatirma = item.get("depositEnable", True)
-            cekim = item.get("withdrawEnable", True)
-            sonuc[f"BTCTurk_{isim}_yatirma"] = {"aktif": yatirma, "isim": f"{isim} Yatırma"}
-            sonuc[f"BTCTurk_{isim}_cekim"] = {"aktif": cekim, "isim": f"{isim} Çekim"}
-        return sonuc
-    except Exception as e:
-        print(f"BTCTürk durum hata: {e}")
-        return {}
-
-
-def durum_kontrol_et():
-    """Çekim/yatırma durumlarını kontrol et, değişiklik varsa bildir"""
-    global onceki_durum
-    cid = os.getenv("CHAT_ID_06")
-
-    tum_durum = {}
-    tum_durum.update(paribu_durum_kontrol())
-    tum_durum.update(btcturk_durum_kontrol())
-
-    for anahtar, bilgi in tum_durum.items():
-        aktif = bilgi["aktif"]
-        isim = bilgi["isim"]
-        onceki = onceki_durum.get(anahtar)
-
-        if onceki is None:
-            onceki_durum[anahtar] = aktif
-            continue
-
-        if onceki != aktif:
-            onceki_durum[anahtar] = aktif
-            if not aktif:
-                telegram_gonder(cid, f"🔴 <b>{isim}</b> kapatıldı!")
-                print(f"[DURUM] 🔴 {isim} kapatıldı!")
-            else:
-                telegram_gonder(cid, f"🟢 <b>{isim}</b> tekrar açıldı!")
-                print(f"[DURUM] 🟢 {isim} açıldı!")
-
-
-def telegram_komutlari_isle():
-    """Telegram'dan gelen /ban, /unban, /banlist komutlarını işle"""
-    global update_offset, MANUEL_BAN
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-        r = requests.get(url, params={"offset": update_offset, "timeout": 1}, timeout=5)
-        guncellemeler = r.json().get("result", [])
-        for guncelleme in guncellemeler:
-            update_offset = guncelleme["update_id"] + 1
-            mesaj = guncelleme.get("message", {})
-            chat_id = str(mesaj.get("chat", {}).get("id", ""))
-            metin = mesaj.get("text", "").strip()
-
-            print(f"[DEBUG] Mesaj geldi - chat_id: {chat_id}, metin: {metin[:30]}")
-            izinli = [ADMIN_ID, os.getenv("CHAT_ID_06",""), os.getenv("CHAT_ID_15",""), os.getenv("CHAT_ID_40","")]
-            if chat_id not in izinli:
-                print(f"[DEBUG] Yetkisiz: {chat_id}")
-                continue
-
-            if metin.startswith("/ban "):
-                coin = metin[5:].strip().upper()
-                MANUEL_BAN.add(coin)
-                ban_kaydet(MANUEL_BAN)
-                telegram_gonder(chat_id, f"🚫 <b>{coin}</b> banlı listeye eklendi.")
-                print(f"[KOMUT] /ban {coin}")
-
-            elif metin.startswith("/unban "):
-                coin = metin[7:].strip().upper()
-                MANUEL_BAN.discard(coin)
-                ban_kaydet(MANUEL_BAN)
-                telegram_gonder(chat_id, f"✅ <b>{coin}</b> ban listesinden çıkarıldı.")
-                print(f"[KOMUT] /unban {coin}")
-
-            elif metin == "/banlist":
-                if MANUEL_BAN:
-                    liste = ", ".join(sorted(MANUEL_BAN))
-                    telegram_gonder(chat_id, "🚫 <b>Banlı Coinler:</b>\n" + liste)
-                else:
-                    telegram_gonder(chat_id, "✅ Banlı coin yok.")
-                print(f"[KOMUT] /banlist")
-
-    except Exception as e:
-        print(f"[KOMUT HATA] {e}")
-
+# ─── TELEGRAM ────────────────────────────────────────────────────────────────
 
 def get_gruplar():
     cid_06 = os.getenv("CHAT_ID_06")
@@ -217,8 +94,64 @@ def telegram_gonder(chat_id, mesaj):
         print(f"Telegram hata: {e}")
 
 
+def komut_dinleyici():
+    """Ayrı thread'de Telegram komutlarını dinle"""
+    offset = 0
+    print("[KOMUT] Dinleyici başladı")
+    while True:
+        try:
+            r = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+                params={"offset": offset, "timeout": 30},
+                timeout=35
+            )
+            veri = r.json()
+            if not veri.get("ok"):
+                time.sleep(5)
+                continue
+
+            for guncelleme in veri.get("result", []):
+                offset = guncelleme["update_id"] + 1
+                mesaj = guncelleme.get("message", {})
+                chat_id = str(mesaj.get("chat", {}).get("id", ""))
+                metin = mesaj.get("text", "").strip()
+
+                if not metin:
+                    continue
+
+                print(f"[KOMUT] Gelen: chat_id={chat_id} metin={metin}")
+
+                izinli = [ADMIN_ID]
+                if chat_id not in izinli:
+                    continue
+
+                if metin.startswith("/ban "):
+                    coin = metin[5:].strip().upper()
+                    MANUEL_BAN.add(coin)
+                    telegram_gonder(chat_id, f"🚫 <b>{coin}</b> banlı listeye eklendi.")
+                    print(f"[KOMUT] /ban {coin} - Banlı: {MANUEL_BAN}")
+
+                elif metin.startswith("/unban "):
+                    coin = metin[7:].strip().upper()
+                    MANUEL_BAN.discard(coin)
+                    telegram_gonder(chat_id, f"✅ <b>{coin}</b> ban listesinden çıkarıldı.")
+                    print(f"[KOMUT] /unban {coin}")
+
+                elif metin == "/banlist":
+                    if MANUEL_BAN:
+                        liste = ", ".join(sorted(MANUEL_BAN))
+                        telegram_gonder(chat_id, "🚫 <b>Banlı Coinler:</b>\n" + liste)
+                    else:
+                        telegram_gonder(chat_id, "✅ Banlı coin yok.")
+
+        except Exception as e:
+            print(f"[KOMUT HATA] {e}")
+            time.sleep(5)
+
+
+# ─── BORSA HATA KONTROLÜ ─────────────────────────────────────────────────────
+
 def borsa_hata_kontrol(borsa, basarili):
-    global hata_sayac
     if basarili:
         hata_sayac[borsa] = 0
         return
@@ -226,8 +159,9 @@ def borsa_hata_kontrol(borsa, basarili):
     if hata_sayac[borsa] == HATA_LIMIT:
         cid = os.getenv("CHAT_ID_06")
         telegram_gonder(cid, f"⚠️ <b>{borsa}</b> {HATA_LIMIT} turda üst üste hata veriyor!")
-        print(f"[UYARI] {borsa} {HATA_LIMIT} tur üst üste hata!")
 
+
+# ─── FİYAT FORMATI ───────────────────────────────────────────────────────────
 
 def fiyat_formatla(fiyat):
     if fiyat >= 1000:
@@ -245,7 +179,6 @@ def fiyat_formatla(fiyat):
 # ─── BORSA FİYAT FONKSİYONLARI ───────────────────────────────────────────────
 
 def binance_tek_fiyat(coin):
-    """Tek coin için Binance fiyatı al"""
     try:
         r = requests.get("https://api.binance.com/api/v3/ticker/price",
                         params={"symbol": f"{coin}USDT"}, timeout=5)
@@ -256,7 +189,6 @@ def binance_tek_fiyat(coin):
 
 
 def binance_tek_hacim(coin):
-    """Tek coin için Binance hacmi al"""
     try:
         r = requests.get("https://api.binance.com/api/v3/ticker/24hr",
                         params={"symbol": f"{coin}USDT"}, timeout=5)
@@ -266,16 +198,9 @@ def binance_tek_hacim(coin):
     return 0
 
 
-def binance_tumfiyatlar():
-    # Binance tek sorguda 451 veriyor, tl_coinler listesi sonradan doluyor
-    # Bu yüzden boş döndürüyoruz, karsilastir içinde coin bazlı sorgu atılacak
-    return {}
-
-
 def gate_tumfiyatlar():
     try:
         r = requests.get("https://api.gateio.ws/api/v4/spot/tickers", timeout=10)
-        r.raise_for_status()
         sonuc = {}
         for item in r.json():
             if item["currency_pair"].endswith("_USDT"):
@@ -298,7 +223,6 @@ def gate_tumfiyatlar():
 def mexc_tumfiyatlar():
     try:
         r = requests.get("https://api.mexc.com/api/v3/ticker/24hr", timeout=15)
-        r.raise_for_status()
         sonuc = {}
         for item in r.json():
             if not isinstance(item, dict): continue
@@ -324,7 +248,6 @@ def okx_tumfiyatlar():
     try:
         r = requests.get("https://www.okx.com/api/v5/market/tickers",
                          params={"instType": "SPOT"}, timeout=10)
-        r.raise_for_status()
         sonuc = {}
         for item in r.json().get("data", []):
             if item["instId"].endswith("-USDT"):
@@ -347,7 +270,6 @@ def okx_tumfiyatlar():
 def kucoin_tumfiyatlar():
     try:
         r = requests.get("https://api.kucoin.com/api/v1/market/allTickers", timeout=15)
-        r.raise_for_status()
         sonuc = {}
         for item in r.json().get("data", {}).get("ticker", []):
             sym = item.get("symbol", "")
@@ -361,7 +283,6 @@ def kucoin_tumfiyatlar():
                         sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
                 except: pass
         borsa_hata_kontrol("KuCoin", True)
-        print(f"KuCoin: {len(sonuc)} coin")
         return sonuc
     except Exception as e:
         print(f"KuCoin hata: {e}")
@@ -372,13 +293,12 @@ def kucoin_tumfiyatlar():
 def paribu_tumfiyatlar():
     try:
         r = requests.get("https://www.paribu.com/ticker", timeout=10)
-        r.raise_for_status()
         sonuc = {}
         veri = r.json()
         if isinstance(veri, dict):
             for parite, bilgi in veri.items():
-                if parite.endswith("_tl") or parite.endswith("TL"):
-                    coin = parite.replace("_tl","").replace("TL","").upper()
+                if parite.endswith("_TL") or parite.endswith("_tl"):
+                    coin = parite.upper().replace("_TL", "")
                     try:
                         fiyat = float(bilgi.get("last", 0))
                         ask   = float(bilgi.get("lowestAsk", fiyat))
@@ -398,7 +318,6 @@ def paribu_tumfiyatlar():
 def btcturk_tumfiyatlar():
     try:
         r = requests.get("https://api.btcturk.com/api/v2/ticker", timeout=10)
-        r.raise_for_status()
         sonuc = {}
         for item in r.json().get("data", []):
             if item.get("pair", "").endswith("TRY"):
@@ -411,27 +330,23 @@ def btcturk_tumfiyatlar():
                     if fiyat > 0:
                         sonuc[coin] = {"fiyat": fiyat, "ask": ask, "bid": bid, "hacim": hacim}
                 except: pass
-        borsa_hata_kontrol("BTCTurk", True)
+        borsa_hata_kontrol("BTCTürk", True)
         return sonuc
     except Exception as e:
-        print(f"BTCTurk hata: {e}")
-        borsa_hata_kontrol("BTCTurk", False)
+        print(f"BTCTürk hata: {e}")
+        borsa_hata_kontrol("BTCTürk", False)
         return {}
 
 
 # ─── ORDERBOOK FONKSİYONLARI ─────────────────────────────────────────────────
 
 def orderbook_ask(borsa, coin):
-    """Yabancı borsadan en iyi ask fiyatı — biz buradan alacağız"""
     try:
         if borsa == "Binance":
-            for base in ["api","api1","api2","api3"]:
-                try:
-                    r = requests.get(f"https://{base}.binance.com/api/v3/ticker/bookTicker",
-                                   params={"symbol": f"{coin}USDT"}, timeout=5)
-                    if r.status_code == 200:
-                        return float(r.json()["askPrice"])
-                except: continue
+            r = requests.get("https://api.binance.com/api/v3/ticker/bookTicker",
+                           params={"symbol": f"{coin}USDT"}, timeout=5)
+            if r.status_code == 200:
+                return float(r.json()["askPrice"])
         elif borsa == "Gate":
             r = requests.get("https://api.gateio.ws/api/v4/spot/order_book",
                            params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
@@ -445,7 +360,7 @@ def orderbook_ask(borsa, coin):
                            params={"instId": f"{coin}-USDT"}, timeout=5)
             return float(r.json()["data"][0]["askPx"])
         elif borsa == "KuCoin":
-            r = requests.get(f"https://api.kucoin.com/api/v1/market/orderbook/level1",
+            r = requests.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
                            params={"symbol": f"{coin}-USDT"}, timeout=5)
             return float(r.json()["data"]["bestAsk"])
     except: pass
@@ -453,16 +368,12 @@ def orderbook_ask(borsa, coin):
 
 
 def orderbook_bid(borsa, coin):
-    """Yabancı borsadan en iyi bid fiyatı — biz buraya satacağız"""
     try:
         if borsa == "Binance":
-            for base in ["api","api1","api2","api3"]:
-                try:
-                    r = requests.get(f"https://{base}.binance.com/api/v3/ticker/bookTicker",
-                                   params={"symbol": f"{coin}USDT"}, timeout=5)
-                    if r.status_code == 200:
-                        return float(r.json()["bidPrice"])
-                except: continue
+            r = requests.get("https://api.binance.com/api/v3/ticker/bookTicker",
+                           params={"symbol": f"{coin}USDT"}, timeout=5)
+            if r.status_code == 200:
+                return float(r.json()["bidPrice"])
         elif borsa == "Gate":
             r = requests.get("https://api.gateio.ws/api/v4/spot/order_book",
                            params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
@@ -476,7 +387,7 @@ def orderbook_bid(borsa, coin):
                            params={"instId": f"{coin}-USDT"}, timeout=5)
             return float(r.json()["data"][0]["bidPx"])
         elif borsa == "KuCoin":
-            r = requests.get(f"https://api.kucoin.com/api/v1/market/orderbook/level1",
+            r = requests.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
                            params={"symbol": f"{coin}-USDT"}, timeout=5)
             return float(r.json()["data"]["bestBid"])
     except: pass
@@ -487,13 +398,11 @@ def paribu_bid(coin):
     try:
         r = requests.get("https://api.paribu.com/orderbook",
                         params={"market": f"{coin.lower()}_tl", "depth": 1}, timeout=5)
-        veri = r.json()
-        bids = veri.get("bids", [])
+        bids = r.json().get("bids", [])
         if bids:
             ilk = bids[0]
             if isinstance(ilk, list): return float(ilk[0])
             elif isinstance(ilk, (int, float, str)): return float(ilk)
-            elif isinstance(ilk, dict): return float(ilk.get("price", ilk.get("p", 0)))
     except: pass
     return None
 
@@ -502,13 +411,11 @@ def paribu_ask(coin):
     try:
         r = requests.get("https://api.paribu.com/orderbook",
                         params={"market": f"{coin.lower()}_tl", "depth": 1}, timeout=5)
-        veri = r.json()
-        asks = veri.get("asks", [])
+        asks = r.json().get("asks", [])
         if asks:
             ilk = asks[0]
             if isinstance(ilk, list): return float(ilk[0])
             elif isinstance(ilk, (int, float, str)): return float(ilk)
-            elif isinstance(ilk, dict): return float(ilk.get("price", ilk.get("p", 0)))
     except: pass
     return None
 
@@ -517,8 +424,7 @@ def btcturk_bid(coin):
     try:
         r = requests.get("https://api.btcturk.com/api/v2/orderbook",
                         params={"pairSymbol": f"{coin}TRY"}, timeout=5)
-        veri = r.json()
-        bids = veri.get("data", {}).get("bids", [])
+        bids = r.json().get("data", {}).get("bids", [])
         if bids:
             ilk = bids[0]
             if isinstance(ilk, list): return float(ilk[0])
@@ -531,8 +437,7 @@ def btcturk_ask(coin):
     try:
         r = requests.get("https://api.btcturk.com/api/v2/orderbook",
                         params={"pairSymbol": f"{coin}TRY"}, timeout=5)
-        veri = r.json()
-        asks = veri.get("data", {}).get("asks", [])
+        asks = r.json().get("data", {}).get("asks", [])
         if asks:
             ilk = asks[0]
             if isinstance(ilk, list): return float(ilk[0])
@@ -541,7 +446,7 @@ def btcturk_ask(coin):
     return None
 
 
-# ─── YARDIMCI FONKSİYONLAR ───────────────────────────────────────────────────
+# ─── YARDIMCI ────────────────────────────────────────────────────────────────
 
 def usdt_tl_kuru(paribu, btcturk):
     kurlar = []
@@ -558,7 +463,6 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
             anahtar = f"{coin}_{esik}"
             simdi = time.time()
 
-            # Ban kontrolü
             if anahtar in coin_ban:
                 if simdi < coin_ban[anahtar]:
                     break
@@ -566,13 +470,11 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
                     del coin_ban[anahtar]
                     coin_sayac[anahtar] = []
 
-            # Sayaç güncelle
             if anahtar not in coin_sayac:
                 coin_sayac[anahtar] = []
             coin_sayac[anahtar] = [t for t in coin_sayac[anahtar] if simdi - t < SPAM_SURE]
             coin_sayac[anahtar].append(simdi)
 
-            # Spam kontrolü
             if len(coin_sayac[anahtar]) > SPAM_LIMIT:
                 seviye = ban_seviye.get(anahtar, 0)
                 ban_sure = BAN_SURELER[min(seviye, len(BAN_SURELER)-1)]
@@ -589,7 +491,6 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
                 )
                 break
 
-            # Tekrar süresi kontrolü
             son = son_bildirim.get(anahtar, 0)
             bekleme = TEKRAR_SURE.get(esik, 600)
             if simdi - son > bekleme:
@@ -615,8 +516,10 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
         return
     if coin in MANUEL_BAN:
         return
+
     usdt_fiyat = usdt_veri["fiyat"]
-    tl_fiyat   = tl_veri["fiyat"]
+    tl_bid     = tl_veri.get("bid", tl_veri["fiyat"])
+    tl_ask     = tl_veri.get("ask", tl_veri["fiyat"])
     usdt_hacim = usdt_veri["hacim"]
     tl_hacim   = tl_veri["hacim"] / kur
     min_hacim  = min(usdt_hacim, tl_hacim)
@@ -624,62 +527,45 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
     usdt_tl = usdt_fiyat * kur
 
     # Yabancıdan al → TL'de sat
-    # Biz yabancıdan ask fiyatından alacağız, TL borsasında bid fiyatından satacağız
-    tl_bid = tl_veri.get("bid", tl_fiyat)  # BTCTürk/Paribu bid
     if tl_bid > usdt_tl:
         fark = ((tl_bid - usdt_tl) / usdt_tl) * 100
-        if fark > 50:
-            return
-        if fark >= 0.6:
+        if 0 < fark <= 50:
             ask = orderbook_ask(borsa_usdt, coin)
             if ask and ask > 0:
                 ask_tl = ask * kur
                 gercek_fark = ((tl_bid - ask_tl) / ask_tl) * 100
                 if gercek_fark > 0:
-                    bildirim_gonder(
-                        coin, borsa_usdt, borsa_tl,
+                    bildirim_gonder(coin, borsa_usdt, borsa_tl,
                         f"${fiyat_formatla(ask)} (≈₺{fiyat_formatla(ask_tl)})",
                         f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
-                        gercek_fark, min_hacim, kur
-                    )
+                        gercek_fark, min_hacim, kur)
             else:
-                bildirim_gonder(
-                    coin, borsa_usdt, borsa_tl,
+                bildirim_gonder(coin, borsa_usdt, borsa_tl,
                     f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_tl)})",
                     f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
-                    fark, min_hacim, kur
-                )
+                    fark, min_hacim, kur)
 
     # TL'den al → Yabancıda sat
-    # Biz TL borsasından ask fiyatından alacağız, yabancıda bid fiyatından satacağız
-    tl_ask = tl_veri.get("ask", tl_fiyat)  # BTCTürk/Paribu ask
     tl_ask_usdt = tl_ask / kur
     if usdt_fiyat > tl_ask_usdt:
         fark = ((usdt_fiyat - tl_ask_usdt) / tl_ask_usdt) * 100
-        if fark > 50:
-            return
-        if fark >= 0.6:
+        if 0 < fark <= 50:
             bid = orderbook_bid(borsa_usdt, coin)
             if bid and bid > 0:
                 gercek_fark = ((bid - tl_ask_usdt) / tl_ask_usdt) * 100
                 if gercek_fark > 0:
-                    bildirim_gonder(
-                        coin, borsa_tl, borsa_usdt,
+                    bildirim_gonder(coin, borsa_tl, borsa_usdt,
                         f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
                         f"${fiyat_formatla(bid)} (≈₺{fiyat_formatla(bid*kur)})",
-                        gercek_fark, min_hacim, kur
-                    )
+                        gercek_fark, min_hacim, kur)
             else:
-                bildirim_gonder(
-                    coin, borsa_tl, borsa_usdt,
+                bildirim_gonder(coin, borsa_tl, borsa_usdt,
                     f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
                     f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_fiyat*kur)})",
-                    fark, min_hacim, kur
-                )
+                    fark, min_hacim, kur)
 
 
 def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur):
-    """Paribu ↔ BTCTürk orderbook ile karşılaştır"""
     if coin in MANUEL_BAN:
         return
     p_fiyat  = paribu_veri["fiyat"]
@@ -691,7 +577,6 @@ def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur):
     if p_fiyat <= 0 or b_fiyat <= 0:
         return
 
-    # Paribu'dan al → BTCTürk'te sat
     if b_fiyat > p_fiyat:
         fark = ((b_fiyat - p_fiyat) / p_fiyat) * 100
         if 0 < fark <= 50:
@@ -708,7 +593,6 @@ def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur):
                     f"₺{fiyat_formatla(p_fiyat)}", f"₺{fiyat_formatla(b_fiyat)}",
                     fark, min_hacim, kur)
 
-    # BTCTürk'ten al → Paribu'da sat
     elif p_fiyat > b_fiyat:
         fark = ((p_fiyat - b_fiyat) / b_fiyat) * 100
         if 0 < fark <= 50:
@@ -726,10 +610,69 @@ def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur):
                     fark, min_hacim, kur)
 
 
+# ─── DURUM KONTROLÜ ──────────────────────────────────────────────────────────
+
+def paribu_durum_kontrol():
+    try:
+        r = requests.get("https://status.paribu.com/api/v2/components.json", timeout=10)
+        sonuc = {}
+        for item in r.json().get("components", []):
+            isim  = item.get("name", "")
+            durum = item.get("status", "")
+            aktif = durum == "operational"
+            sonuc[f"Paribu_{isim}"] = {"aktif": aktif, "isim": f"Paribu {isim}"}
+        return sonuc
+    except: return {}
+
+
+def btcturk_durum_kontrol():
+    try:
+        r = requests.get("https://api.btcturk.com/api/v2/server/exchangeinfo", timeout=10)
+        sonuc = {}
+        for item in r.json().get("data", {}).get("currencies", []):
+            isim    = item.get("name", "")
+            yatirma = item.get("depositEnable", True)
+            cekim   = item.get("withdrawEnable", True)
+            sonuc[f"BTCTurk_{isim}_yatirma"] = {"aktif": yatirma, "isim": f"BTCTürk {isim} Yatırma"}
+            sonuc[f"BTCTurk_{isim}_cekim"]   = {"aktif": cekim,   "isim": f"BTCTürk {isim} Çekim"}
+        return sonuc
+    except: return {}
+
+
+def durum_kontrol_et():
+    global onceki_durum
+    cid = os.getenv("CHAT_ID_06")
+    tum_durum = {}
+    tum_durum.update(paribu_durum_kontrol())
+    tum_durum.update(btcturk_durum_kontrol())
+
+    for anahtar, bilgi in tum_durum.items():
+        aktif = bilgi["aktif"]
+        isim  = bilgi["isim"]
+        onceki = onceki_durum.get(anahtar)
+        if onceki is None:
+            onceki_durum[anahtar] = aktif
+            continue
+        if onceki != aktif:
+            onceki_durum[anahtar] = aktif
+            if not aktif:
+                telegram_gonder(cid, f"🔴 <b>{isim}</b> kapatıldı!")
+                print(f"[DURUM] 🔴 {isim} kapatıldı!")
+            else:
+                telegram_gonder(cid, f"🟢 <b>{isim}</b> tekrar açıldı!")
+                print(f"[DURUM] 🟢 {isim} açıldı!")
+
+
 # ─── ANA DÖNGÜ ───────────────────────────────────────────────────────────────
 
 def bot_calistir():
+    global son_durum_kontrol
+
     print("Arbitraj Alarm Botu v5 başlatılıyor...")
+
+    # Komut dinleyiciyi ayrı thread'de başlat
+    t = threading.Thread(target=komut_dinleyici, daemon=True)
+    t.start()
 
     telegram_gonder(os.getenv("CHAT_ID_06"),
         f"✅ <b>Arbitraj Alarm Botu v5 Başladı</b>\n"
@@ -741,18 +684,13 @@ def bot_calistir():
     )
 
     while True:
-        # Telegram komutlarını kontrol et
-        telegram_komutlari_isle()
-
-        # Çekim/yatırma durum kontrolü (30 saniyede bir)
-        global son_durum_kontrol
+        # Durum kontrolü
         if time.time() - son_durum_kontrol >= DURUM_KONTROL_SURESI:
             durum_kontrol_et()
             son_durum_kontrol = time.time()
 
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Fiyatlar çekiliyor...")
 
-        binance = binance_tumfiyatlar()
         gate    = gate_tumfiyatlar()
         mexc    = mexc_tumfiyatlar()
         okx     = okx_tumfiyatlar()
@@ -772,24 +710,22 @@ def bot_calistir():
         tl_coinler.discard("USDT")
 
         usdt_borsalar = {
-            "Binance": binance,
-            "Gate":    gate,
-            "MEXC":    mexc,
-            "OKX":     okx,
-            "KuCoin":  kucoin,
+            "Gate":   gate,
+            "MEXC":   mexc,
+            "OKX":    okx,
+            "KuCoin": kucoin,
         }
 
         for coin in tl_coinler:
-            # Manuel ban kontrolü
             if coin in MANUEL_BAN:
                 continue
 
-            # Binance coin bazlı sorgu (EU bölgede çalışıyor)
+            # Binance coin bazlı sorgu
             if coin not in BINANCE_HARIC:
                 b_fiyat = binance_tek_fiyat(coin)
                 if b_fiyat and b_fiyat > 0:
                     b_hacim = binance_tek_hacim(coin)
-                    b_veri = {"fiyat": b_fiyat, "hacim": b_hacim}
+                    b_veri  = {"fiyat": b_fiyat, "hacim": b_hacim}
                     if coin in paribu:
                         karsilastir(coin, b_veri, paribu[coin], "Binance", "Paribu", kur)
                     if coin in btcturk:
@@ -803,7 +739,7 @@ def bot_calistir():
                 if coin in btcturk:
                     karsilastir(coin, fiyatlar_usdt[coin], btcturk[coin], borsa_usdt, "BTCTürk", kur)
 
-            # Paribu ↔ BTCTürk (orderbook ile)
+            # Paribu ↔ BTCTürk
             if coin in paribu and coin in btcturk:
                 karsilastir_tl(coin, paribu[coin], btcturk[coin], kur)
 
