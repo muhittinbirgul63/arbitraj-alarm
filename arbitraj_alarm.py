@@ -54,6 +54,11 @@ GRUP_EMOJI = {
 # Manuel ban listesi (Telegram'dan /ban komutuyla eklenir)
 MANUEL_BAN = set()
 
+# Çekim/yatırma durum takibi
+onceki_durum = {}  # {borsa_coin: True/False}
+son_durum_kontrol = 0
+DURUM_KONTROL_SURESI = 30  # saniye
+
 # Yetkili kullanıcı ID
 ADMIN_ID = os.getenv("ADMIN_ID", "1072335473")
 
@@ -63,6 +68,67 @@ HATA_LIMIT = 10
 
 # Telegram update offset
 update_offset = 0
+
+
+def paribu_durum_kontrol():
+    """Paribu status sayfasından çekim/yatırma durumunu çek"""
+    try:
+        r = requests.get("https://status.paribu.com/api/v2/components.json", timeout=10)
+        sonuc = {}
+        for item in r.json().get("components", []):
+            isim = item.get("name", "")
+            durum = item.get("status", "")  # operational, degraded_performance, partial_outage, major_outage
+            aktif = durum == "operational"
+            sonuc[f"Paribu_{isim}"] = {"aktif": aktif, "durum": durum, "isim": isim}
+        return sonuc
+    except Exception as e:
+        print(f"Paribu durum hata: {e}")
+        return {}
+
+
+def btcturk_durum_kontrol():
+    """BTCTürk exchangeinfo'dan çekim/yatırma durumunu çek"""
+    try:
+        r = requests.get("https://api.btcturk.com/api/v2/server/exchangeinfo", timeout=10)
+        sonuc = {}
+        for item in r.json().get("data", {}).get("currencies", []):
+            isim = item.get("name", "")
+            yatirma = item.get("depositEnable", True)
+            cekim = item.get("withdrawEnable", True)
+            sonuc[f"BTCTurk_{isim}_yatirma"] = {"aktif": yatirma, "isim": f"{isim} Yatırma"}
+            sonuc[f"BTCTurk_{isim}_cekim"] = {"aktif": cekim, "isim": f"{isim} Çekim"}
+        return sonuc
+    except Exception as e:
+        print(f"BTCTürk durum hata: {e}")
+        return {}
+
+
+def durum_kontrol_et():
+    """Çekim/yatırma durumlarını kontrol et, değişiklik varsa bildir"""
+    global onceki_durum
+    cid = os.getenv("CHAT_ID_06")
+
+    tum_durum = {}
+    tum_durum.update(paribu_durum_kontrol())
+    tum_durum.update(btcturk_durum_kontrol())
+
+    for anahtar, bilgi in tum_durum.items():
+        aktif = bilgi["aktif"]
+        isim = bilgi["isim"]
+        onceki = onceki_durum.get(anahtar)
+
+        if onceki is None:
+            onceki_durum[anahtar] = aktif
+            continue
+
+        if onceki != aktif:
+            onceki_durum[anahtar] = aktif
+            if not aktif:
+                telegram_gonder(cid, f"🔴 <b>{isim}</b> kapatıldı!")
+                print(f"[DURUM] 🔴 {isim} kapatıldı!")
+            else:
+                telegram_gonder(cid, f"🟢 <b>{isim}</b> tekrar açıldı!")
+                print(f"[DURUM] 🟢 {isim} açıldı!")
 
 
 def telegram_komutlari_isle():
@@ -654,6 +720,12 @@ def bot_calistir():
     while True:
         # Telegram komutlarını kontrol et
         telegram_komutlari_isle()
+
+        # Çekim/yatırma durum kontrolü (30 saniyede bir)
+        global son_durum_kontrol
+        if time.time() - son_durum_kontrol >= DURUM_KONTROL_SURESI:
+            durum_kontrol_et()
+            son_durum_kontrol = time.time()
 
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Fiyatlar çekiliyor...")
 
