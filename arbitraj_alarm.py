@@ -51,9 +51,58 @@ GRUP_EMOJI = {
     0.6: "📊",
 }
 
+# Manuel ban listesi (Telegram'dan /ban komutuyla eklenir)
+MANUEL_BAN = set()
+
+# Yetkili kullanıcı ID
+ADMIN_ID = os.getenv("ADMIN_ID", "1072335473")
+
 # Hata sayaçları
 hata_sayac = {}
 HATA_LIMIT = 10
+
+# Telegram update offset
+update_offset = 0
+
+
+def telegram_komutlari_isle():
+    """Telegram'dan gelen /ban, /unban, /banlist komutlarını işle"""
+    global update_offset, MANUEL_BAN
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+        r = requests.get(url, params={"offset": update_offset, "timeout": 1}, timeout=5)
+        guncellemeler = r.json().get("result", [])
+        for guncelleme in guncellemeler:
+            update_offset = guncelleme["update_id"] + 1
+            mesaj = guncelleme.get("message", {})
+            chat_id = str(mesaj.get("chat", {}).get("id", ""))
+            metin = mesaj.get("text", "").strip()
+
+            if chat_id != ADMIN_ID:
+                continue
+
+            if metin.startswith("/ban "):
+                coin = metin[5:].strip().upper()
+                MANUEL_BAN.add(coin)
+                telegram_gonder(chat_id, f"🚫 <b>{coin}</b> banlı listeye eklendi.")
+                print(f"[KOMUT] /ban {coin}")
+
+            elif metin.startswith("/unban "):
+                coin = metin[7:].strip().upper()
+                MANUEL_BAN.discard(coin)
+                telegram_gonder(chat_id, f"✅ <b>{coin}</b> ban listesinden çıkarıldı.")
+                print(f"[KOMUT] /unban {coin}")
+
+            elif metin == "/banlist":
+                if MANUEL_BAN:
+                    liste = ", ".join(sorted(MANUEL_BAN))
+                    telegram_gonder(chat_id, "🚫 <b>Banlı Coinler:</b>\n" + liste)
+                else:
+                    telegram_gonder(chat_id, "✅ Banlı coin yok.")
+                print(f"[KOMUT] /banlist")
+
+    except Exception as e:
+        pass
 
 
 def get_gruplar():
@@ -475,6 +524,8 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
 def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
     if not kur or kur <= 0:
         return
+    if coin in MANUEL_BAN:
+        return
     usdt_fiyat = usdt_veri["fiyat"]
     tl_fiyat   = tl_veri["fiyat"]
     usdt_hacim = usdt_veri["hacim"]
@@ -540,6 +591,8 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
 
 def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur):
     """Paribu ↔ BTCTürk orderbook ile karşılaştır"""
+    if coin in MANUEL_BAN:
+        return
     p_fiyat  = paribu_veri["fiyat"]
     b_fiyat  = btcturk_veri["fiyat"]
     p_hacim  = paribu_veri["hacim"] / kur
@@ -599,6 +652,9 @@ def bot_calistir():
     )
 
     while True:
+        # Telegram komutlarını kontrol et
+        telegram_komutlari_isle()
+
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Fiyatlar çekiliyor...")
 
         binance = binance_tumfiyatlar()
