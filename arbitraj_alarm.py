@@ -178,6 +178,33 @@ def fiyat_formatla(fiyat):
 
 # ─── BORSA FİYAT FONKSİYONLARI ───────────────────────────────────────────────
 
+def binance_tumfiyatlar():
+    """Binance tüm fiyatları tek sorguda çek"""
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15)
+        sonuc = {}
+        for item in r.json():
+            if not isinstance(item, dict): continue
+            sym = item.get("symbol", "")
+            if sym.endswith("USDT"):
+                coin = sym[:-4]
+                if coin in BINANCE_HARIC: continue
+                try:
+                    fiyat = float(item["lastPrice"])
+                    hacim = float(item["quoteVolume"])
+                    if fiyat > 0:
+                        sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
+                except: pass
+        if sonuc:
+            print(f"Binance: {len(sonuc)} coin")
+        borsa_hata_kontrol("Binance", True)
+        return sonuc
+    except Exception as e:
+        print(f"Binance hata: {e}")
+        borsa_hata_kontrol("Binance", False)
+        return {}
+
+
 def binance_tek_fiyat(coin):
     try:
         r = requests.get("https://api.binance.com/api/v3/ticker/price",
@@ -689,6 +716,7 @@ def bot_calistir():
             sonuclar[isim] = fn()
 
         threadler = [
+            threading.Thread(target=cek, args=("binance", binance_tumfiyatlar)),
             threading.Thread(target=cek, args=("gate",    gate_tumfiyatlar)),
             threading.Thread(target=cek, args=("mexc",    mexc_tumfiyatlar)),
             threading.Thread(target=cek, args=("okx",     okx_tumfiyatlar)),
@@ -699,6 +727,7 @@ def bot_calistir():
         for t in threadler: t.start()
         for t in threadler: t.join(timeout=20)
 
+        binance = sonuclar.get("binance", {})
         gate    = sonuclar.get("gate", {})
         mexc    = sonuclar.get("mexc", {})
         okx     = sonuclar.get("okx", {})
@@ -723,21 +752,13 @@ def bot_calistir():
             "OKX":    okx,
             "KuCoin": kucoin,
         }
+        # Binance paralel threadden gelecek, döngü başında eklenecek
+
+        usdt_borsalar["Binance"] = binance
 
         for coin in tl_coinler:
             if coin in MANUEL_BAN:
                 continue
-
-            # Binance coin bazlı sorgu
-            if coin not in BINANCE_HARIC:
-                b_fiyat = binance_tek_fiyat(coin)
-                if b_fiyat and b_fiyat > 0:
-                    b_hacim = binance_tek_hacim(coin)
-                    b_veri  = {"fiyat": b_fiyat, "hacim": b_hacim}
-                    if coin in paribu:
-                        karsilastir(coin, b_veri, paribu[coin], "Binance", "Paribu", kur)
-                    if coin in btcturk:
-                        karsilastir(coin, b_veri, btcturk[coin], "Binance", "BTCTürk", kur)
 
             for borsa_usdt, fiyatlar_usdt in usdt_borsalar.items():
                 if coin not in fiyatlar_usdt:
