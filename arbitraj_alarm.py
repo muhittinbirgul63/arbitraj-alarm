@@ -516,18 +516,19 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
         return
 
     usdt_fiyat = usdt_veri["fiyat"]
-    tl_bid     = tl_veri.get("bid", tl_veri["fiyat"])
-    tl_ask     = tl_veri.get("ask", tl_veri["fiyat"])
+    tl_bid     = tl_veri.get("bid", tl_veri["fiyat"])  # Türk borsası highestBid
+    tl_ask     = tl_veri.get("ask", tl_veri["fiyat"])  # Türk borsası lowestAsk
     usdt_hacim = usdt_veri["hacim"]
     tl_hacim   = tl_veri["hacim"] / kur
     min_hacim  = min(usdt_hacim, tl_hacim)
 
-    usdt_tl = usdt_fiyat * kur
-
     # Yabancıdan al → TL'de sat
+    # Yabancı borsa market fiyatı × kur < Türk borsa bid fiyatı
+    usdt_tl = usdt_fiyat * kur
     if tl_bid > usdt_tl:
         fark = ((tl_bid - usdt_tl) / usdt_tl) * 100
         if 0 < fark <= 50:
+            # Yabancı borsada orderbook ask al
             ask = orderbook_ask(borsa_usdt, coin)
             if ask and ask > 0:
                 ask_tl = ask * kur
@@ -538,16 +539,19 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
                         f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
                         gercek_fark, min_hacim, kur)
             else:
+                # Orderbook alınamazsa market fiyatıyla bildir
                 bildirim_gonder(coin, borsa_usdt, borsa_tl,
                     f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_tl)})",
                     f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
                     fark, min_hacim, kur)
 
     # TL'den al → Yabancıda sat
+    # Türk borsa ask fiyatı / kur < Yabancı borsa market fiyatı
     tl_ask_usdt = tl_ask / kur
     if usdt_fiyat > tl_ask_usdt:
         fark = ((usdt_fiyat - tl_ask_usdt) / tl_ask_usdt) * 100
         if 0 < fark <= 50:
+            # Yabancı borsada orderbook bid al
             bid = orderbook_bid(borsa_usdt, coin)
             if bid and bid > 0:
                 gercek_fark = ((bid - tl_ask_usdt) / tl_ask_usdt) * 100
@@ -557,6 +561,7 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
                         f"${fiyat_formatla(bid)} (≈₺{fiyat_formatla(bid*kur)})",
                         gercek_fark, min_hacim, kur)
             else:
+                # Orderbook alınamazsa market fiyatıyla bildir
                 bildirim_gonder(coin, borsa_tl, borsa_usdt,
                     f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
                     f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_fiyat*kur)})",
