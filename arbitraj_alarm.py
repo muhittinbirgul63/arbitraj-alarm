@@ -774,8 +774,7 @@ def bot_calistir():
             if coin in paribu and coin in btcturk:
                 karsilastir_tl(coin, paribu[coin], btcturk[coin], kur)
 
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Tur tamamlandı, 10s bekleniyor...")
-        time.sleep(10)
+        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Tur tamamlandı.")
 
 
 if __name__ == "__main__":
