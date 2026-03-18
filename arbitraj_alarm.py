@@ -14,7 +14,9 @@ import time
 import os
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+TZ_TR = timezone(timedelta(hours=3))  # Türkiye saati UTC+3
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -522,7 +524,7 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
             bekleme = TEKRAR_SURE.get(esik, 600)
             if simdi - son > bekleme:
                 son_bildirim[anahtar] = simdi
-                zaman = datetime.now().strftime("%H:%M:%S")
+                zaman = datetime.now(TZ_TR).strftime("%H:%M:%S")
                 grup_emoji = GRUP_EMOJI.get(esik, "📊")
                 hacim_str = f"${hacim_usdt:,.0f}" if hacim_usdt >= MIN_HACIM_USDT else "⚠️ Yetersiz"
                 mesaj = (
