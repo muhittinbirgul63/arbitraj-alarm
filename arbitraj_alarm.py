@@ -566,55 +566,36 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
 def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur):
     if coin in MANUEL_BAN:
         return
-    p_fiyat  = paribu_veri["fiyat"]
-    b_fiyat  = btcturk_veri["fiyat"]
+
+    p_ask   = paribu_veri.get("ask", paribu_veri["fiyat"])   # Paribu lowestAsk
+    p_bid   = paribu_veri.get("bid", paribu_veri["fiyat"])   # Paribu highestBid
+    b_ask   = btcturk_veri.get("ask", btcturk_veri["fiyat"]) # BTCTürk ask
+    b_bid   = btcturk_veri.get("bid", btcturk_veri["fiyat"]) # BTCTürk bid
 
     p_hacim  = paribu_veri["hacim"] / kur
     b_hacim  = btcturk_veri["hacim"] / kur
     min_hacim = min(p_hacim, b_hacim)
 
-    if p_fiyat <= 0 or b_fiyat <= 0:
+    if p_ask <= 0 or b_ask <= 0:
         return
 
-    if b_fiyat > p_fiyat:
-        fark = ((b_fiyat - p_fiyat) / p_fiyat) * 100
+    # Paribu'dan al → BTCTürk'te sat
+    # Paribu ask ile BTCTürk bid karşılaştır
+    if b_bid > p_ask:
+        fark = ((b_bid - p_ask) / p_ask) * 100
         if 0 < fark <= 50:
-            ask = paribu_ask(coin)
-            bid = btcturk_bid(coin)
-            if ask and bid and ask > 0 and bid > 0:
-                gercek_fark = ((bid - ask) / ask) * 100
-                if gercek_fark > 0:
-                    bildirim_gonder(coin, "Paribu", "BTCTürk",
-                        f"₺{fiyat_formatla(ask)}", f"₺{fiyat_formatla(bid)}",
-                        gercek_fark, min_hacim, kur)
-                else:
-                    print(f"[ORDERBOOK NEGATİF] {coin} Paribu→BTCTürk market:%{fark:.2f} gerçek:%{gercek_fark:.2f} ask:{ask} bid:{bid}")
-            else:
-                # Orderbook alınamazsa market fiyatıyla bildir
-                print(f"[ORDERBOOK YOK] {coin} Paribu→BTCTürk market:%{fark:.2f}")
-                bildirim_gonder(coin, "Paribu", "BTCTürk",
-                    f"₺{fiyat_formatla(p_fiyat)}", f"₺{fiyat_formatla(b_fiyat)}",
-                    fark, min_hacim, kur)
+            bildirim_gonder(coin, "Paribu", "BTCTürk",
+                f"₺{fiyat_formatla(p_ask)}", f"₺{fiyat_formatla(b_bid)}",
+                fark, min_hacim, kur)
 
-    elif p_fiyat > b_fiyat:
-        fark = ((p_fiyat - b_fiyat) / b_fiyat) * 100
+    # BTCTürk'ten al → Paribu'da sat
+    # BTCTürk ask ile Paribu bid karşılaştır
+    elif p_bid > b_ask:
+        fark = ((p_bid - b_ask) / b_ask) * 100
         if 0 < fark <= 50:
-            ask = btcturk_ask(coin)
-            bid = paribu_bid(coin)
-            if ask and bid and ask > 0 and bid > 0:
-                gercek_fark = ((bid - ask) / ask) * 100
-                if gercek_fark > 0:
-                    bildirim_gonder(coin, "BTCTürk", "Paribu",
-                        f"₺{fiyat_formatla(ask)}", f"₺{fiyat_formatla(bid)}",
-                        gercek_fark, min_hacim, kur)
-                else:
-                    print(f"[ORDERBOOK NEGATİF] {coin} BTCTürk→Paribu market:%{fark:.2f} gerçek:%{gercek_fark:.2f} ask:{ask} bid:{bid}")
-            else:
-                # Orderbook alınamazsa market fiyatıyla bildir
-                print(f"[ORDERBOOK YOK] {coin} BTCTürk→Paribu market:%{fark:.2f}")
-                bildirim_gonder(coin, "BTCTürk", "Paribu",
-                    f"₺{fiyat_formatla(b_fiyat)}", f"₺{fiyat_formatla(p_fiyat)}",
-                    fark, min_hacim, kur)
+            bildirim_gonder(coin, "BTCTürk", "Paribu",
+                f"₺{fiyat_formatla(b_ask)}", f"₺{fiyat_formatla(p_bid)}",
+                fark, min_hacim, kur)
 
 
 # ─── DURUM KONTROLÜ ──────────────────────────────────────────────────────────
