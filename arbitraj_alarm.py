@@ -684,12 +684,27 @@ def bot_calistir():
 
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Fiyatlar çekiliyor...")
 
-        gate    = gate_tumfiyatlar()
-        mexc    = mexc_tumfiyatlar()
-        okx     = okx_tumfiyatlar()
-        kucoin  = kucoin_tumfiyatlar()
-        paribu  = paribu_tumfiyatlar()
-        btcturk = btcturk_tumfiyatlar()
+        sonuclar = {}
+        def cek(isim, fn):
+            sonuclar[isim] = fn()
+
+        threadler = [
+            threading.Thread(target=cek, args=("gate",    gate_tumfiyatlar)),
+            threading.Thread(target=cek, args=("mexc",    mexc_tumfiyatlar)),
+            threading.Thread(target=cek, args=("okx",     okx_tumfiyatlar)),
+            threading.Thread(target=cek, args=("kucoin",  kucoin_tumfiyatlar)),
+            threading.Thread(target=cek, args=("paribu",  paribu_tumfiyatlar)),
+            threading.Thread(target=cek, args=("btcturk", btcturk_tumfiyatlar)),
+        ]
+        for t in threadler: t.start()
+        for t in threadler: t.join(timeout=20)
+
+        gate    = sonuclar.get("gate", {})
+        mexc    = sonuclar.get("mexc", {})
+        okx     = sonuclar.get("okx", {})
+        kucoin  = sonuclar.get("kucoin", {})
+        paribu  = sonuclar.get("paribu", {})
+        btcturk = sonuclar.get("btcturk", {})
 
         kur = usdt_tl_kuru(paribu, btcturk)
         if not kur:
