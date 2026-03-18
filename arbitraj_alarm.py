@@ -757,6 +757,10 @@ def bot_calistir():
         }
 
         for coin in tl_coinler:
+            # Manuel ban kontrolü
+            if coin in MANUEL_BAN:
+                continue
+
             # Binance coin bazlı sorgu (EU bölgede çalışıyor)
             if coin not in BINANCE_HARIC:
                 b_fiyat = binance_tek_fiyat(coin)
