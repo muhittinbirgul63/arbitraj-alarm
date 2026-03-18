@@ -499,9 +499,7 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
                 grup_emoji = GRUP_EMOJI.get(esik, "📊")
                 hacim_str = f"${hacim_usdt:,.0f}" if hacim_usdt >= MIN_HACIM_USDT else "⚠️ Yetersiz"
                 mesaj = (
-                    f"━━━━━━━━━━━━━━━\n"
                     f"🚨 <b>{coin}</b> {grup_emoji} %{fark_yuzde:.2f}\n"
-                    f"━━━━━━━━━━━━━━━\n"
                     f"🟢 <b>{al_borsa}</b> → {al_fiyat_str}\n"
                     f"🔴 <b>{sat_borsa}</b> → {sat_fiyat_str}\n"
                     f"📊 {hacim_str} | ₺{kur:.2f} | {zaman}"
