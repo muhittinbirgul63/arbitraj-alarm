@@ -10,6 +10,7 @@ Kripto Arbitraj Alarm Botu v5
 import requests
 import time
 import os
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -52,7 +53,24 @@ GRUP_EMOJI = {
 }
 
 # Manuel ban listesi (Telegram'dan /ban komutuyla eklenir)
-MANUEL_BAN = set()
+BAN_DOSYA = "/app/manuel_ban.json"
+
+def ban_yukle():
+    try:
+        if os.path.exists(BAN_DOSYA):
+            with open(BAN_DOSYA, "r") as f:
+                return set(json.load(f))
+    except: pass
+    return set()
+
+def ban_kaydet(ban_set):
+    try:
+        with open(BAN_DOSYA, "w") as f:
+            json.dump(list(ban_set), f)
+    except Exception as e:
+        print(f"Ban kayıt hata: {e}")
+
+MANUEL_BAN = ban_yukle()
 
 # Çekim/yatırma durum takibi
 onceki_durum = {}  # {borsa_coin: True/False}
@@ -144,18 +162,22 @@ def telegram_komutlari_isle():
             chat_id = str(mesaj.get("chat", {}).get("id", ""))
             metin = mesaj.get("text", "").strip()
 
+            print(f"[DEBUG] Mesaj geldi - chat_id: {chat_id}, ADMIN_ID: {ADMIN_ID}, metin: {metin[:30]}")
             if chat_id != ADMIN_ID:
+                print(f"[DEBUG] Yetkisiz: {chat_id} != {ADMIN_ID}")
                 continue
 
             if metin.startswith("/ban "):
                 coin = metin[5:].strip().upper()
                 MANUEL_BAN.add(coin)
+                ban_kaydet(MANUEL_BAN)
                 telegram_gonder(chat_id, f"🚫 <b>{coin}</b> banlı listeye eklendi.")
                 print(f"[KOMUT] /ban {coin}")
 
             elif metin.startswith("/unban "):
                 coin = metin[7:].strip().upper()
                 MANUEL_BAN.discard(coin)
+                ban_kaydet(MANUEL_BAN)
                 telegram_gonder(chat_id, f"✅ <b>{coin}</b> ban listesinden çıkarıldı.")
                 print(f"[KOMUT] /unban {coin}")
 
