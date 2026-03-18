@@ -190,7 +190,7 @@ def telegram_komutlari_isle():
                 print(f"[KOMUT] /banlist")
 
     except Exception as e:
-        pass
+        print(f"[KOMUT HATA] {e}")
 
 
 def get_gruplar():
