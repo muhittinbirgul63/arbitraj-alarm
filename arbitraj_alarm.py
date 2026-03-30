@@ -63,7 +63,9 @@ son_durum_kontrol = 0
 DURUM_KONTROL_SURESI = 30
 
 sonuclar_lock = threading.Lock()
-okx_cache = {}  # OKX ask/bid cache — orderbook isteği atmamak için
+okx_cache     = {}  # OKX ask/bid cache
+binance_cache = {}  # Binance ask/bid cache
+gate_cache    = {}  # Gate ask/bid cache
 
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
@@ -176,8 +178,15 @@ def binance_tumfiyatlar():
                 try:
                     fiyat = float(item["lastPrice"])
                     hacim = float(item["quoteVolume"])
+                    ask   = float(item.get("askPrice", 0) or 0)
+                    bid   = float(item.get("bidPrice", 0) or 0)
                     if fiyat > 0:
-                        sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
+                        sonuc[coin] = {
+                            "fiyat": fiyat,
+                            "hacim": hacim,
+                            "ask":   ask if ask > 0 else fiyat,
+                            "bid":   bid if bid > 0 else fiyat,
+                        }
                 except: pass
         borsa_hata_kontrol("Binance", True)
         return sonuc
@@ -198,8 +207,15 @@ def gate_tumfiyatlar():
                 try:
                     fiyat = float(item.get("last", 0))
                     hacim = float(item.get("quote_volume", 0))
+                    ask   = float(item.get("lowest_ask", 0) or 0)
+                    bid   = float(item.get("highest_bid", 0) or 0)
                     if fiyat > 0:
-                        sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
+                        sonuc[coin] = {
+                            "fiyat": fiyat,
+                            "hacim": hacim,
+                            "ask":   ask if ask > 0 else fiyat,
+                            "bid":   bid if bid > 0 else fiyat,
+                        }
                 except: pass
         borsa_hata_kontrol("Gate", True)
         return sonuc
@@ -337,11 +353,18 @@ def btcturk_tumfiyatlar():
 def orderbook_ask(borsa, coin):
     try:
         if borsa == "Binance":
+            veri = binance_cache.get(coin)
+            if veri and veri.get("ask", 0) > 0:
+                return veri["ask"]
+            # Fallback: direkt istek
             r = requests.get("https://api.binance.com/api/v3/ticker/bookTicker",
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             if r.status_code == 200:
                 return float(r.json()["askPrice"])
         elif borsa == "Gate":
+            veri = gate_cache.get(coin)
+            if veri and veri.get("ask", 0) > 0:
+                return veri["ask"]
             r = requests.get("https://api.gateio.ws/api/v4/spot/order_book",
                            params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
             return float(r.json()["asks"][0][0])
@@ -350,7 +373,6 @@ def orderbook_ask(borsa, coin):
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             return float(r.json()["askPrice"])
         elif borsa == "OKX":
-            # Cache'den al, istek atma
             veri = okx_cache.get(coin)
             if veri and veri.get("ask", 0) > 0:
                 return veri["ask"]
@@ -366,11 +388,17 @@ def orderbook_ask(borsa, coin):
 def orderbook_bid(borsa, coin):
     try:
         if borsa == "Binance":
+            veri = binance_cache.get(coin)
+            if veri and veri.get("bid", 0) > 0:
+                return veri["bid"]
             r = requests.get("https://api.binance.com/api/v3/ticker/bookTicker",
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             if r.status_code == 200:
                 return float(r.json()["bidPrice"])
         elif borsa == "Gate":
+            veri = gate_cache.get(coin)
+            if veri and veri.get("bid", 0) > 0:
+                return veri["bid"]
             r = requests.get("https://api.gateio.ws/api/v4/spot/order_book",
                            params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
             return float(r.json()["bids"][0][0])
@@ -379,7 +407,6 @@ def orderbook_bid(borsa, coin):
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             return float(r.json()["bidPrice"])
         elif borsa == "OKX":
-            # Cache'den al, istek atma
             veri = okx_cache.get(coin)
             if veri and veri.get("bid", 0) > 0:
                 return veri["bid"]
@@ -670,9 +697,10 @@ def bot_calistir():
         paribu  = sonuclar.get("paribu",  {})
         btcturk = sonuclar.get("btcturk", {})
 
-        # OKX cache güncelle (orderbook isteği atmamak için)
-        okx_cache.clear()
-        okx_cache.update(okx)
+        # Cache güncelle (orderbook isteği atmamak için)
+        okx_cache.clear();     okx_cache.update(okx)
+        binance_cache.clear(); binance_cache.update(binance)
+        gate_cache.clear();    gate_cache.update(gate)
 
         kur = usdt_tl_kuru(paribu, btcturk)
         if not kur:
