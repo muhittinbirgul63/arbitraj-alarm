@@ -495,42 +495,33 @@ def karsilastir_orderbook(aday):
     min_hacim  = aday["min_hacim"]
 
     if aday["yon"] == "usdt_al":
-        usdt_tl = aday["usdt_tl"]
         tl_bid  = aday["tl_bid"]
-        fark    = aday["fark"]
         ask = orderbook_ask(borsa_usdt, coin)
-        if ask and ask > 0:
-            ask_tl      = ask * kur
-            gercek_fark = ((tl_bid - ask_tl) / ask_tl) * 100
-            if gercek_fark > 0:
-                bildirim_gonder(coin, borsa_usdt, borsa_tl,
-                    f"${fiyat_formatla(ask)} (≈₺{fiyat_formatla(ask_tl)})",
-                    f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
-                    gercek_fark, min_hacim, kur)
-        else:
+        if not ask or ask <= 0:
+            print(f"[ORDERBOOK] {coin} {borsa_usdt} ask alınamadı, alarm atlandı")
+            return
+        ask_tl      = ask * kur
+        gercek_fark = ((tl_bid - ask_tl) / ask_tl) * 100
+        if gercek_fark > 0:
             bildirim_gonder(coin, borsa_usdt, borsa_tl,
-                f"${fiyat_formatla(aday['usdt_fiyat'])} (≈₺{fiyat_formatla(usdt_tl)})",
+                f"${fiyat_formatla(ask)} (≈₺{fiyat_formatla(ask_tl)})",
                 f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
-                fark, min_hacim, kur)
+                gercek_fark, min_hacim, kur)
 
     elif aday["yon"] == "tl_al":
         tl_ask      = aday["tl_ask"]
         tl_ask_usdt = aday["tl_ask_usdt"]
-        usdt_fiyat  = aday["usdt_fiyat"]
         fark        = aday["fark"]
         bid = orderbook_bid(borsa_usdt, coin)
-        if bid and bid > 0:
-            gercek_fark = ((bid - tl_ask_usdt) / tl_ask_usdt) * 100
-            if gercek_fark > 0:
-                bildirim_gonder(coin, borsa_tl, borsa_usdt,
-                    f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
-                    f"${fiyat_formatla(bid)} (≈₺{fiyat_formatla(bid*kur)})",
-                    gercek_fark, min_hacim, kur)
-        else:
+        if not bid or bid <= 0:
+            print(f"[ORDERBOOK] {coin} {borsa_usdt} bid alınamadı, alarm atlandı")
+            return
+        gercek_fark = ((bid - tl_ask_usdt) / tl_ask_usdt) * 100
+        if gercek_fark > 0:
             bildirim_gonder(coin, borsa_tl, borsa_usdt,
                 f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
-                f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_fiyat*kur)})",
-                fark, min_hacim, kur)
+                f"${fiyat_formatla(bid)} (≈₺{fiyat_formatla(bid*kur)})",
+                gercek_fark, min_hacim, kur)
 
 
 def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur):
