@@ -697,13 +697,23 @@ def bot_calistir():
 
         # ── 2. Adaylar için orderbook'ları paralel çek ──
         if adaylar:
+            mexc_semaforu = threading.Semaphore(3)
             print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] {len(adaylar)} aday bulundu, orderbook çekiliyor...")
+
+            def orderbook_isle(aday):
+                if aday.get("borsa_usdt") == "MEXC":
+                    with mexc_semaforu:
+                        karsilastir_orderbook(aday)
+                        time.sleep(0.2)
+                else:
+                    karsilastir_orderbook(aday)
+
             ob_threadler = [
-                threading.Thread(target=karsilastir_orderbook, args=(aday,))
+                threading.Thread(target=orderbook_isle, args=(aday,))
                 for aday in adaylar
             ]
             for t in ob_threadler: t.start()
-            for t in ob_threadler: t.join(timeout=8)
+            for t in ob_threadler: t.join(timeout=15)
 
         tur_suresi = time.time() - tur_baslangic
         print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Tur tamamlandı. ({tur_suresi:.1f}sn)")
