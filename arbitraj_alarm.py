@@ -443,8 +443,10 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
 
 
 def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
+    """Hızlı ön tarama — orderbook olmadan fark var mı kontrol eder.
+    Fark varsa (coin, borsa_usdt, yön) tuple'ı döner, yoksa None."""
     if not kur or kur <= 0 or coin in MANUEL_BAN:
-        return
+        return None
 
     usdt_fiyat = usdt_veri["fiyat"]
     tl_bid     = tl_veri.get("bid", tl_veri["fiyat"])
@@ -454,43 +456,81 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
     min_hacim  = min(usdt_hacim, tl_hacim)
     usdt_tl    = usdt_fiyat * kur
 
+    sonuclar = []
+
     # Yabancıdan al → TL'de sat
     if tl_bid > usdt_tl:
         fark = ((tl_bid - usdt_tl) / usdt_tl) * 100
         if 0 < fark <= 50:
-            ask = orderbook_ask(borsa_usdt, coin)
-            if ask and ask > 0:
-                ask_tl      = ask * kur
-                gercek_fark = ((tl_bid - ask_tl) / ask_tl) * 100
-                if gercek_fark > 0:
-                    bildirim_gonder(coin, borsa_usdt, borsa_tl,
-                        f"${fiyat_formatla(ask)} (≈₺{fiyat_formatla(ask_tl)})",
-                        f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
-                        gercek_fark, min_hacim, kur)
-            else:
-                bildirim_gonder(coin, borsa_usdt, borsa_tl,
-                    f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_tl)})",
-                    f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
-                    fark, min_hacim, kur)
+            sonuclar.append({
+                "yon": "usdt_al",
+                "coin": coin, "borsa_usdt": borsa_usdt, "borsa_tl": borsa_tl,
+                "usdt_fiyat": usdt_fiyat, "tl_bid": tl_bid,
+                "usdt_tl": usdt_tl, "fark": fark,
+                "min_hacim": min_hacim, "kur": kur,
+            })
 
     # TL'den al → Yabancıda sat
     tl_ask_usdt = tl_ask / kur
     if usdt_fiyat > tl_ask_usdt:
         fark = ((usdt_fiyat - tl_ask_usdt) / tl_ask_usdt) * 100
         if 0 < fark <= 50:
-            bid = orderbook_bid(borsa_usdt, coin)
-            if bid and bid > 0:
-                gercek_fark = ((bid - tl_ask_usdt) / tl_ask_usdt) * 100
-                if gercek_fark > 0:
-                    bildirim_gonder(coin, borsa_tl, borsa_usdt,
-                        f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
-                        f"${fiyat_formatla(bid)} (≈₺{fiyat_formatla(bid*kur)})",
-                        gercek_fark, min_hacim, kur)
-            else:
+            sonuclar.append({
+                "yon": "tl_al",
+                "coin": coin, "borsa_usdt": borsa_usdt, "borsa_tl": borsa_tl,
+                "usdt_fiyat": usdt_fiyat, "tl_ask": tl_ask,
+                "tl_ask_usdt": tl_ask_usdt, "fark": fark,
+                "min_hacim": min_hacim, "kur": kur,
+            })
+
+    return sonuclar if sonuclar else None
+
+
+def karsilastir_orderbook(aday):
+    """Tek bir aday için orderbook çekip gerçek farkı hesaplar ve alarm gönderir."""
+    kur       = aday["kur"]
+    coin      = aday["coin"]
+    borsa_usdt = aday["borsa_usdt"]
+    borsa_tl   = aday["borsa_tl"]
+    min_hacim  = aday["min_hacim"]
+
+    if aday["yon"] == "usdt_al":
+        usdt_tl = aday["usdt_tl"]
+        tl_bid  = aday["tl_bid"]
+        fark    = aday["fark"]
+        ask = orderbook_ask(borsa_usdt, coin)
+        if ask and ask > 0:
+            ask_tl      = ask * kur
+            gercek_fark = ((tl_bid - ask_tl) / ask_tl) * 100
+            if gercek_fark > 0:
+                bildirim_gonder(coin, borsa_usdt, borsa_tl,
+                    f"${fiyat_formatla(ask)} (≈₺{fiyat_formatla(ask_tl)})",
+                    f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
+                    gercek_fark, min_hacim, kur)
+        else:
+            bildirim_gonder(coin, borsa_usdt, borsa_tl,
+                f"${fiyat_formatla(aday['usdt_fiyat'])} (≈₺{fiyat_formatla(usdt_tl)})",
+                f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
+                fark, min_hacim, kur)
+
+    elif aday["yon"] == "tl_al":
+        tl_ask      = aday["tl_ask"]
+        tl_ask_usdt = aday["tl_ask_usdt"]
+        usdt_fiyat  = aday["usdt_fiyat"]
+        fark        = aday["fark"]
+        bid = orderbook_bid(borsa_usdt, coin)
+        if bid and bid > 0:
+            gercek_fark = ((bid - tl_ask_usdt) / tl_ask_usdt) * 100
+            if gercek_fark > 0:
                 bildirim_gonder(coin, borsa_tl, borsa_usdt,
                     f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
-                    f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_fiyat*kur)})",
-                    fark, min_hacim, kur)
+                    f"${fiyat_formatla(bid)} (≈₺{fiyat_formatla(bid*kur)})",
+                    gercek_fark, min_hacim, kur)
+        else:
+            bildirim_gonder(coin, borsa_tl, borsa_usdt,
+                f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
+                f"${fiyat_formatla(usdt_fiyat)} (≈₺{fiyat_formatla(usdt_fiyat*kur)})",
+                fark, min_hacim, kur)
 
 
 def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur):
@@ -645,20 +685,34 @@ def bot_calistir():
             "KuCoin":  kucoin,
         }
 
+        # ── 1. Hızlı ön tarama (orderbook yok) ──
+        adaylar = []
         for coin in tl_coinler:
             if coin in MANUEL_BAN:
                 continue
-
             for borsa_usdt, fiyatlar_usdt in usdt_borsalar.items():
                 if coin not in fiyatlar_usdt:
                     continue
                 if coin in paribu:
-                    karsilastir(coin, fiyatlar_usdt[coin], paribu[coin], borsa_usdt, "Paribu", kur)
+                    sonuc = karsilastir(coin, fiyatlar_usdt[coin], paribu[coin], borsa_usdt, "Paribu", kur)
+                    if sonuc:
+                        adaylar.extend(sonuc)
                 if coin in btcturk:
-                    karsilastir(coin, fiyatlar_usdt[coin], btcturk[coin], borsa_usdt, "BTCTürk", kur)
-
+                    sonuc = karsilastir(coin, fiyatlar_usdt[coin], btcturk[coin], borsa_usdt, "BTCTürk", kur)
+                    if sonuc:
+                        adaylar.extend(sonuc)
             if coin in paribu and coin in btcturk:
                 karsilastir_tl(coin, paribu[coin], btcturk[coin], kur)
+
+        # ── 2. Adaylar için orderbook'ları paralel çek ──
+        if adaylar:
+            print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] {len(adaylar)} aday bulundu, orderbook çekiliyor...")
+            ob_threadler = [
+                threading.Thread(target=karsilastir_orderbook, args=(aday,))
+                for aday in adaylar
+            ]
+            for t in ob_threadler: t.start()
+            for t in ob_threadler: t.join(timeout=8)
 
         tur_suresi = time.time() - tur_baslangic
         print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Tur tamamlandı. ({tur_suresi:.1f}sn)")
