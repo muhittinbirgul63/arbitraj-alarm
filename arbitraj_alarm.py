@@ -63,9 +63,11 @@ son_durum_kontrol = 0
 DURUM_KONTROL_SURESI = 30
 
 sonuclar_lock = threading.Lock()
-okx_cache     = {}  # OKX ask/bid cache
-binance_cache = {}  # Binance ask/bid cache
-gate_cache    = {}  # Gate ask/bid cache
+okx_cache     = {}
+binance_cache = {}
+gate_cache    = {}
+mexc_cache    = {}
+kucoin_cache  = {}
 
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
@@ -238,8 +240,15 @@ def mexc_tumfiyatlar():
                 try:
                     fiyat = float(item.get("lastPrice", 0))
                     hacim = float(item.get("quoteVolume", 0))
+                    ask   = float(item.get("askPrice", 0) or 0)
+                    bid   = float(item.get("bidPrice", 0) or 0)
                     if fiyat > 0:
-                        sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
+                        sonuc[coin] = {
+                            "fiyat": fiyat,
+                            "hacim": hacim,
+                            "ask":   ask if ask > 0 else fiyat,
+                            "bid":   bid if bid > 0 else fiyat,
+                        }
                 except: pass
         borsa_hata_kontrol("MEXC", True)
         return sonuc
@@ -291,8 +300,15 @@ def kucoin_tumfiyatlar():
                 try:
                     fiyat = float(item.get("last", 0) or 0)
                     hacim = float(item.get("volValue", 0) or 0)
+                    ask   = float(item.get("sell", 0) or 0)
+                    bid   = float(item.get("buy",  0) or 0)
                     if fiyat > 0:
-                        sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
+                        sonuc[coin] = {
+                            "fiyat": fiyat,
+                            "hacim": hacim,
+                            "ask":   ask if ask > 0 else fiyat,
+                            "bid":   bid if bid > 0 else fiyat,
+                        }
                 except: pass
         borsa_hata_kontrol("KuCoin", True)
         return sonuc
@@ -369,6 +385,9 @@ def orderbook_ask(borsa, coin):
                            params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
             return float(r.json()["asks"][0][0])
         elif borsa == "MEXC":
+            veri = mexc_cache.get(coin)
+            if veri and veri.get("ask", 0) > 0:
+                return veri["ask"]
             r = requests.get("https://api.mexc.com/api/v3/ticker/bookTicker",
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             return float(r.json()["askPrice"])
@@ -378,6 +397,9 @@ def orderbook_ask(borsa, coin):
                 return veri["ask"]
             return None
         elif borsa == "KuCoin":
+            veri = kucoin_cache.get(coin)
+            if veri and veri.get("ask", 0) > 0:
+                return veri["ask"]
             r = requests.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
                            params={"symbol": f"{coin}-USDT"}, timeout=5)
             return float(r.json()["data"]["bestAsk"])
@@ -403,6 +425,9 @@ def orderbook_bid(borsa, coin):
                            params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
             return float(r.json()["bids"][0][0])
         elif borsa == "MEXC":
+            veri = mexc_cache.get(coin)
+            if veri and veri.get("bid", 0) > 0:
+                return veri["bid"]
             r = requests.get("https://api.mexc.com/api/v3/ticker/bookTicker",
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             return float(r.json()["bidPrice"])
@@ -412,6 +437,9 @@ def orderbook_bid(borsa, coin):
                 return veri["bid"]
             return None
         elif borsa == "KuCoin":
+            veri = kucoin_cache.get(coin)
+            if veri and veri.get("bid", 0) > 0:
+                return veri["bid"]
             r = requests.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
                            params={"symbol": f"{coin}-USDT"}, timeout=5)
             return float(r.json()["data"]["bestBid"])
@@ -701,6 +729,8 @@ def bot_calistir():
         okx_cache.clear();     okx_cache.update(okx)
         binance_cache.clear(); binance_cache.update(binance)
         gate_cache.clear();    gate_cache.update(gate)
+        mexc_cache.clear();    mexc_cache.update(mexc)
+        kucoin_cache.clear();  kucoin_cache.update(kucoin)
 
         kur = usdt_tl_kuru(paribu, btcturk)
         if not kur:
