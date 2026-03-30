@@ -33,9 +33,9 @@ KUCOIN_HARIC  = {"FB"}
 MIN_HACIM_USDT = 100_000
 
 TEKRAR_SURE = {
-    4.0: 60,
-    1.5: 60,
-    0.6: 60,
+    4.0: 30,
+    1.5: 30,
+    0.6: 30,
 }
 
 son_bildirim = {}
@@ -471,29 +471,10 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
                     del coin_ban[anahtar]
                     coin_sayac[anahtar] = []
 
-            if anahtar not in coin_sayac:
-                coin_sayac[anahtar] = []
-            coin_sayac[anahtar] = [t for t in coin_sayac[anahtar] if simdi - t < SPAM_SURE]
-            coin_sayac[anahtar].append(simdi)
-
-            if len(coin_sayac[anahtar]) > SPAM_LIMIT:
-                seviye   = ban_seviye.get(anahtar, 0)
-                ban_sure = BAN_SURELER[min(seviye, len(BAN_SURELER)-1)]
-                coin_ban[anahtar]     = simdi + ban_sure
-                ban_seviye[anahtar]   = seviye + 1
-                coin_sayac[anahtar]   = []
-                ban_dk  = ban_sure // 60
-                ban_sa  = ban_dk // 60
-                ban_str = f"{ban_sa} saat" if ban_sa > 0 else f"{ban_dk} dakika"
-                print(f"[BAN] {coin} %{esik} - {ban_str} ban (seviye {seviye+1})")
-                telegram_gonder(chat_id,
-                    f"🚫 <b>{coin}</b> — {ban_str} ban\n"
-                    f"10 dakikada {SPAM_LIMIT}+ bildirim gönderildi.")
-                break
-
             son     = son_bildirim.get(anahtar, 0)
             bekleme = TEKRAR_SURE.get(esik, 600)
             if simdi - son > bekleme:
+                # Mesaj gönder
                 son_bildirim[anahtar] = simdi
                 zaman      = datetime.now(TZ_TR).strftime("%H:%M:%S")
                 grup_emoji = GRUP_EMOJI.get(esik, "📊")
@@ -506,6 +487,26 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
                 )
                 print(f"[{zaman}] {grup_emoji} {coin} {al_borsa}→{sat_borsa} %{fark_yuzde:.2f}")
                 telegram_gonder(chat_id, mesaj)
+
+                # Mesaj atıldıktan sonra sayaca ekle
+                if anahtar not in coin_sayac:
+                    coin_sayac[anahtar] = []
+                coin_sayac[anahtar] = [t for t in coin_sayac[anahtar] if simdi - t < SPAM_SURE]
+                coin_sayac[anahtar].append(simdi)
+
+                if len(coin_sayac[anahtar]) > SPAM_LIMIT:
+                    seviye   = ban_seviye.get(anahtar, 0)
+                    ban_sure = BAN_SURELER[min(seviye, len(BAN_SURELER)-1)]
+                    coin_ban[anahtar]   = simdi + ban_sure
+                    ban_seviye[anahtar] = seviye + 1
+                    coin_sayac[anahtar] = []
+                    ban_dk  = ban_sure // 60
+                    ban_sa  = ban_dk // 60
+                    ban_str = f"{ban_sa} saat" if ban_sa > 0 else f"{ban_dk} dakika"
+                    print(f"[BAN] {coin} %{esik} - {ban_str} ban (seviye {seviye+1})")
+                    telegram_gonder(chat_id,
+                        f"🚫 <b>{coin}</b> — {ban_str} ban\n"
+                        f"10 dakikada {SPAM_LIMIT}+ bildirim gönderildi.")
             break
 
 
