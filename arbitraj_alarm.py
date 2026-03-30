@@ -597,6 +597,7 @@ def bot_calistir():
             durum_kontrol_et()
             son_durum_kontrol = time.time()
 
+        tur_baslangic = time.time()
         print(f"\n[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Fiyatlar çekiliyor...")
 
         # Tüm borsaları paralel çek
@@ -659,7 +660,8 @@ def bot_calistir():
             if coin in paribu and coin in btcturk:
                 karsilastir_tl(coin, paribu[coin], btcturk[coin], kur)
 
-        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Tur tamamlandı.")
+        tur_suresi = time.time() - tur_baslangic
+        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Tur tamamlandı. ({tur_suresi:.1f}sn)")
 
 
 if __name__ == "__main__":
