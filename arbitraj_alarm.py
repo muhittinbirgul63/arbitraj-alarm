@@ -781,6 +781,7 @@ def bot_calistir():
 
         tur_suresi = time.time() - tur_baslangic
         print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Tur tamamlandı. ({tur_suresi:.1f}sn)")
+        time.sleep(1)
 
 
 if __name__ == "__main__":
