@@ -63,6 +63,7 @@ son_durum_kontrol = 0
 DURUM_KONTROL_SURESI = 30
 
 sonuclar_lock = threading.Lock()
+okx_cache = {}  # OKX ask/bid cache — orderbook isteği atmamak için
 
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
@@ -243,9 +244,16 @@ def okx_tumfiyatlar():
                 if coin in OKX_HARIC: continue
                 try:
                     fiyat = float(item.get("last", 0))
+                    ask   = float(item.get("askPx", 0) or 0)
+                    bid   = float(item.get("bidPx", 0) or 0)
                     hacim = float(item.get("volCcy24h", 0))
                     if fiyat > 0:
-                        sonuc[coin] = {"fiyat": fiyat, "hacim": hacim}
+                        sonuc[coin] = {
+                            "fiyat": fiyat,
+                            "hacim": hacim,
+                            "ask":   ask if ask > 0 else fiyat,
+                            "bid":   bid if bid > 0 else fiyat,
+                        }
                 except: pass
         borsa_hata_kontrol("OKX", True)
         return sonuc
@@ -342,9 +350,11 @@ def orderbook_ask(borsa, coin):
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             return float(r.json()["askPrice"])
         elif borsa == "OKX":
-            r = requests.get("https://www.okx.com/api/v5/market/ticker",
-                           params={"instId": f"{coin}-USDT"}, timeout=5)
-            return float(r.json()["data"][0]["askPx"])
+            # Cache'den al, istek atma
+            veri = okx_cache.get(coin)
+            if veri and veri.get("ask", 0) > 0:
+                return veri["ask"]
+            return None
         elif borsa == "KuCoin":
             r = requests.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
                            params={"symbol": f"{coin}-USDT"}, timeout=5)
@@ -369,9 +379,11 @@ def orderbook_bid(borsa, coin):
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             return float(r.json()["bidPrice"])
         elif borsa == "OKX":
-            r = requests.get("https://www.okx.com/api/v5/market/ticker",
-                           params={"instId": f"{coin}-USDT"}, timeout=5)
-            return float(r.json()["data"][0]["bidPx"])
+            # Cache'den al, istek atma
+            veri = okx_cache.get(coin)
+            if veri and veri.get("bid", 0) > 0:
+                return veri["bid"]
+            return None
         elif borsa == "KuCoin":
             r = requests.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
                            params={"symbol": f"{coin}-USDT"}, timeout=5)
@@ -657,6 +669,10 @@ def bot_calistir():
         kucoin  = sonuclar.get("kucoin",  {})
         paribu  = sonuclar.get("paribu",  {})
         btcturk = sonuclar.get("btcturk", {})
+
+        # OKX cache güncelle (orderbook isteği atmamak için)
+        okx_cache.clear()
+        okx_cache.update(okx)
 
         kur = usdt_tl_kuru(paribu, btcturk)
         if not kur:
