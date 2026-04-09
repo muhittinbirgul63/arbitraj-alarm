@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+_session = requests.Session()
+
 TZ_TR = timezone(timedelta(hours=3))
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -44,8 +46,8 @@ coin_ban     = {}
 ban_seviye   = {}
 
 BAN_SURELER = [600, 3600, 21600, 86400]
-SPAM_LIMIT  = 30
-SPAM_SURE   = 600
+SPAM_LIMIT  = 15
+SPAM_SURE   = 60
 
 GRUP_EMOJI = {
     4.0: "🚀",
@@ -86,7 +88,7 @@ def get_gruplar():
 def telegram_gonder(chat_id, mesaj):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={
+        _session.post(url, json={
             "chat_id": chat_id,
             "text": mesaj,
             "parse_mode": "HTML"
@@ -100,7 +102,7 @@ def komut_dinleyici():
     print("[KOMUT] Dinleyici başladı")
     while True:
         try:
-            r = requests.get(
+            r = _session.get(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
                 params={"offset": offset, "timeout": 30},
                 timeout=35
@@ -169,7 +171,7 @@ def fiyat_formatla(fiyat):
 
 def binance_tumfiyatlar():
     try:
-        r = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15)
+        r = _session.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15)
         sonuc = {}
         for item in r.json():
             if not isinstance(item, dict): continue
@@ -200,7 +202,7 @@ def binance_tumfiyatlar():
 
 def gate_tumfiyatlar():
     try:
-        r = requests.get("https://api.gateio.ws/api/v4/spot/tickers", timeout=10)
+        r = _session.get("https://api.gateio.ws/api/v4/spot/tickers", timeout=10)
         sonuc = {}
         for item in r.json():
             if item["currency_pair"].endswith("_USDT"):
@@ -229,7 +231,7 @@ def gate_tumfiyatlar():
 
 def mexc_tumfiyatlar():
     try:
-        r = requests.get("https://api.mexc.com/api/v3/ticker/24hr", timeout=15)
+        r = _session.get("https://api.mexc.com/api/v3/ticker/24hr", timeout=15)
         sonuc = {}
         for item in r.json():
             if not isinstance(item, dict): continue
@@ -260,7 +262,7 @@ def mexc_tumfiyatlar():
 
 def okx_tumfiyatlar():
     try:
-        r = requests.get("https://www.okx.com/api/v5/market/tickers",
+        r = _session.get("https://www.okx.com/api/v5/market/tickers",
                          params={"instType": "SPOT"}, timeout=10)
         sonuc = {}
         for item in r.json().get("data", []):
@@ -290,7 +292,7 @@ def okx_tumfiyatlar():
 
 def kucoin_tumfiyatlar():
     try:
-        r = requests.get("https://api.kucoin.com/api/v1/market/allTickers", timeout=15)
+        r = _session.get("https://api.kucoin.com/api/v1/market/allTickers", timeout=15)
         sonuc = {}
         for item in r.json().get("data", {}).get("ticker", []):
             sym = item.get("symbol", "")
@@ -320,7 +322,7 @@ def kucoin_tumfiyatlar():
 
 def paribu_tumfiyatlar():
     try:
-        r = requests.get("https://www.paribu.com/ticker", timeout=10)
+        r = _session.get("https://www.paribu.com/ticker", timeout=10)
         sonuc = {}
         for parite, bilgi in r.json().items():
             if parite.endswith("_TL") or parite.endswith("_tl"):
@@ -343,7 +345,7 @@ def paribu_tumfiyatlar():
 
 def btcturk_tumfiyatlar():
     try:
-        r = requests.get("https://api.btcturk.com/api/v2/ticker", timeout=10)
+        r = _session.get("https://api.btcturk.com/api/v2/ticker", timeout=10)
         sonuc = {}
         for item in r.json().get("data", []):
             if item.get("pair", "").endswith("TRY"):
@@ -373,7 +375,7 @@ def orderbook_ask(borsa, coin):
             if veri and veri.get("ask", 0) > 0:
                 return veri["ask"]
             # Fallback: direkt istek
-            r = requests.get("https://api.binance.com/api/v3/ticker/bookTicker",
+            r = _session.get("https://api.binance.com/api/v3/ticker/bookTicker",
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             if r.status_code == 200:
                 return float(r.json()["askPrice"])
@@ -381,14 +383,14 @@ def orderbook_ask(borsa, coin):
             veri = gate_cache.get(coin)
             if veri and veri.get("ask", 0) > 0:
                 return veri["ask"]
-            r = requests.get("https://api.gateio.ws/api/v4/spot/order_book",
+            r = _session.get("https://api.gateio.ws/api/v4/spot/order_book",
                            params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
             return float(r.json()["asks"][0][0])
         elif borsa == "MEXC":
             veri = mexc_cache.get(coin)
             if veri and veri.get("ask", 0) > 0:
                 return veri["ask"]
-            r = requests.get("https://api.mexc.com/api/v3/ticker/bookTicker",
+            r = _session.get("https://api.mexc.com/api/v3/ticker/bookTicker",
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             return float(r.json()["askPrice"])
         elif borsa == "OKX":
@@ -400,7 +402,7 @@ def orderbook_ask(borsa, coin):
             veri = kucoin_cache.get(coin)
             if veri and veri.get("ask", 0) > 0:
                 return veri["ask"]
-            r = requests.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
+            r = _session.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
                            params={"symbol": f"{coin}-USDT"}, timeout=5)
             return float(r.json()["data"]["bestAsk"])
     except: pass
@@ -413,7 +415,7 @@ def orderbook_bid(borsa, coin):
             veri = binance_cache.get(coin)
             if veri and veri.get("bid", 0) > 0:
                 return veri["bid"]
-            r = requests.get("https://api.binance.com/api/v3/ticker/bookTicker",
+            r = _session.get("https://api.binance.com/api/v3/ticker/bookTicker",
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             if r.status_code == 200:
                 return float(r.json()["bidPrice"])
@@ -421,14 +423,14 @@ def orderbook_bid(borsa, coin):
             veri = gate_cache.get(coin)
             if veri and veri.get("bid", 0) > 0:
                 return veri["bid"]
-            r = requests.get("https://api.gateio.ws/api/v4/spot/order_book",
+            r = _session.get("https://api.gateio.ws/api/v4/spot/order_book",
                            params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
             return float(r.json()["bids"][0][0])
         elif borsa == "MEXC":
             veri = mexc_cache.get(coin)
             if veri and veri.get("bid", 0) > 0:
                 return veri["bid"]
-            r = requests.get("https://api.mexc.com/api/v3/ticker/bookTicker",
+            r = _session.get("https://api.mexc.com/api/v3/ticker/bookTicker",
                            params={"symbol": f"{coin}USDT"}, timeout=5)
             return float(r.json()["bidPrice"])
         elif borsa == "OKX":
@@ -440,7 +442,7 @@ def orderbook_bid(borsa, coin):
             veri = kucoin_cache.get(coin)
             if veri and veri.get("bid", 0) > 0:
                 return veri["bid"]
-            r = requests.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
+            r = _session.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
                            params={"symbol": f"{coin}-USDT"}, timeout=5)
             return float(r.json()["data"]["bestBid"])
     except: pass
@@ -596,6 +598,12 @@ def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur):
     if coin in MANUEL_BAN:
         return
 
+    simdi = time.time()
+    for esik, _ in get_gruplar():
+        anahtar = f"{coin}_{esik}"
+        if anahtar in coin_ban and simdi < coin_ban[anahtar]:
+            return
+
     p_ask  = paribu_veri.get("ask",  paribu_veri["fiyat"])
     p_bid  = paribu_veri.get("bid",  paribu_veri["fiyat"])
     b_ask  = btcturk_veri.get("ask", btcturk_veri["fiyat"])
@@ -629,7 +637,7 @@ def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur):
 
 def paribu_durum_kontrol():
     try:
-        r = requests.get("https://status.paribu.com/api/v2/components.json", timeout=10)
+        r = _session.get("https://status.paribu.com/api/v2/components.json", timeout=10)
         sonuc = {}
         for item in r.json().get("components", []):
             isim  = item.get("name", "")
@@ -641,7 +649,7 @@ def paribu_durum_kontrol():
 
 def btcturk_durum_kontrol():
     try:
-        r = requests.get("https://api.btcturk.com/api/v2/server/exchangeinfo", timeout=10)
+        r = _session.get("https://api.btcturk.com/api/v2/server/exchangeinfo", timeout=10)
         sonuc = {}
         for item in r.json().get("data", {}).get("currencies", []):
             isim = item.get("name", "")
