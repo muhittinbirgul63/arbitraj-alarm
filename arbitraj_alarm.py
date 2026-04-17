@@ -12,7 +12,9 @@ Kripto Arbitraj Alarm Botu v5
 import requests
 import time
 import os
+import json
 import threading
+import websocket  # pip install websocket-client
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
@@ -70,6 +72,14 @@ binance_cache = {}
 gate_cache    = {}
 mexc_cache    = {}
 kucoin_cache  = {}
+
+# ─── PARIBU WEBSOCKET ───────────────────────────────────────────────────────
+PARIBU_WS_URL     = "wss://api.paribu.com/stream"
+paribu_ws_cache   = {}              # {"BTC": {"fiyat": ..., "ask": ..., "bid": ..., "hacim": ...}, ...}
+paribu_ws_son     = {}              # {"BTC": timestamp} - son güncelleme
+paribu_ws_lock    = threading.Lock()
+paribu_markets    = []              # ["btc_tl", "eth_tl", ...]
+paribu_ws_bagli   = False
 
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
@@ -320,37 +330,132 @@ def kucoin_tumfiyatlar():
         return {}
 
 
-def paribu_tumfiyatlar():
+def paribu_market_listesi_cek():
+    """İlk açılışta TL marketlerin listesini REST'ten bir kez çek"""
+    global paribu_markets
     try:
-        # Cache-bust + browser User-Agent + no-cache header'ları
-        # (Railway IP'si CDN tarafında cache'leniyordu, hep aynı fiyat dönüyordu)
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) "
                           "Chrome/131.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
         }
         url = f"https://www.paribu.com/ticker?_={int(time.time() * 1000)}"
         r = _session.get(url, headers=headers, timeout=10)
-        sonuc = {}
-        for parite, bilgi in r.json().items():
+        markets = []
+        for parite in r.json().keys():
             if parite.endswith("_TL") or parite.endswith("_tl"):
-                coin = parite.upper().replace("_TL", "")
-                try:
-                    fiyat = float(bilgi.get("last", 0))
-                    ask   = float(bilgi.get("lowestAsk", fiyat))
-                    bid   = float(bilgi.get("highestBid", fiyat))
-                    hacim = float(bilgi.get("volume", 0)) * fiyat
-                    if fiyat > 0:
-                        sonuc[coin] = {"fiyat": fiyat, "ask": ask, "bid": bid, "hacim": hacim}
-                except: pass
-        borsa_hata_kontrol("Paribu", True)
+                markets.append(parite.lower())
+        paribu_markets = markets
+        print(f"Paribu: {len(markets)} TL marketi bulundu (market listesi)")
+        return True
+    except Exception as e:
+        print(f"Paribu market listesi hata: {e}")
+        return False
+
+
+def paribu_ws_on_open(ws):
+    global paribu_ws_bagli
+    paribu_ws_bagli = True
+    print(f"✅ Paribu WebSocket bağlandı, {len(paribu_markets)} kanala abone olunuyor...")
+    # Sunucuyu boğmamak için 50'şerli batch'ler halinde abone ol
+    BATCH = 50
+    for i in range(0, len(paribu_markets), BATCH):
+        batch = paribu_markets[i:i+BATCH]
+        channels = [f"ticker24h:{m}@1000ms" for m in batch]
+        msg = {
+            "method": "subscribe",
+            "channels": channels,
+            "id": f"sub_{i}",
+        }
+        try:
+            ws.send(json.dumps(msg))
+        except Exception as e:
+            print(f"Paribu WS subscribe hata: {e}")
+        time.sleep(0.1)
+    print(f"✅ Paribu WS abone olundu")
+
+
+def paribu_ws_on_message(ws, message):
+    try:
+        data = json.loads(message)
+        if data.get("e") != "ticker24h":
+            return
+        symbol = data.get("s", "")
+        if not symbol.endswith("_tl"):
+            return
+        coin = symbol[:-3].upper()
+        r = data.get("r", {})
+        fiyat = float(r.get("c", 0))
+        if fiyat <= 0:
+            return
+        hacim_tl = float(r.get("q", 0))  # quote asset volume (TL cinsinden)
+        with paribu_ws_lock:
+            paribu_ws_cache[coin] = {
+                "fiyat": fiyat,
+                "ask":   fiyat,  # WS ticker'da bid/ask yok, son fiyatı kullan
+                "bid":   fiyat,
+                "hacim": hacim_tl,
+            }
+            paribu_ws_son[coin] = time.time()
+    except Exception as e:
+        pass  # Parse hataları çok sık log basmasın
+
+
+def paribu_ws_on_error(ws, error):
+    print(f"Paribu WS hata: {error}")
+
+
+def paribu_ws_on_close(ws, close_status_code, close_msg):
+    global paribu_ws_bagli
+    paribu_ws_bagli = False
+    print(f"Paribu WS kapandı: {close_status_code} {close_msg}")
+
+
+def paribu_ws_thread():
+    """Arka plan thread'i — disconnect olursa otomatik yeniden bağlanır"""
+    # İlk açılışta market listesini çek
+    while not paribu_markets:
+        if paribu_market_listesi_cek():
+            break
+        time.sleep(15)
+
+    while True:
+        try:
+            ws = websocket.WebSocketApp(
+                PARIBU_WS_URL,
+                on_open=paribu_ws_on_open,
+                on_message=paribu_ws_on_message,
+                on_error=paribu_ws_on_error,
+                on_close=paribu_ws_on_close,
+            )
+            ws.run_forever(ping_interval=30, ping_timeout=10)
+        except Exception as e:
+            print(f"Paribu WS exception: {e}")
+        print("Paribu WS 5sn sonra yeniden bağlanıyor...")
+        time.sleep(5)
+
+
+def paribu_tumfiyatlar():
+    """WebSocket cache'ten okur — REST çağrısı YOK"""
+    try:
+        now = time.time()
+        sonuc = {}
+        with paribu_ws_lock:
+            for coin, veri in paribu_ws_cache.items():
+                # Son 90sn içinde güncellenmiş coinleri dahil et (stale guard)
+                if now - paribu_ws_son.get(coin, 0) < 90:
+                    sonuc[coin] = dict(veri)
+        if sonuc:
+            borsa_hata_kontrol("Paribu", True)
+        else:
+            # WS bağlı ama henüz data gelmemiş olabilir (başlangıç)
+            borsa_hata_kontrol("Paribu", paribu_ws_bagli)
         return sonuc
     except Exception as e:
-        print(f"Paribu hata: {e}")
+        print(f"Paribu cache okuma hata: {e}")
         borsa_hata_kontrol("Paribu", False)
         return {}
 
@@ -697,6 +802,21 @@ def bot_calistir():
     global son_durum_kontrol
 
     print("Arbitraj Alarm Botu v5 başlatılıyor...")
+
+    # Paribu WebSocket thread'i (arka planda sürekli çalışır)
+    ws_thread = threading.Thread(target=paribu_ws_thread, daemon=True)
+    ws_thread.start()
+
+    # İlk Paribu datası gelene kadar bekle (max 20sn)
+    print("Paribu WebSocket ilk veriler bekleniyor...")
+    bekleme_basladi = time.time()
+    while time.time() - bekleme_basladi < 20:
+        with paribu_ws_lock:
+            if len(paribu_ws_cache) > 10:
+                break
+        time.sleep(0.5)
+    with paribu_ws_lock:
+        print(f"Paribu WS: {len(paribu_ws_cache)} coin hazır, ana döngü başlıyor")
 
     komut_thread = threading.Thread(target=komut_dinleyici, daemon=True)
     komut_thread.start()
