@@ -78,6 +78,8 @@ bybit_cache   = {}
 
 # Orderbook adayları için sabit worker havuzu (her tur 1000+ thread yaratmamak için)
 ORDERBOOK_POOL = ThreadPoolExecutor(max_workers=50, thread_name_prefix="ob")
+# Telegram mesajları için ayrı havuz — orderbook worker'ları Telegram'ı beklemesin
+TELEGRAM_POOL  = ThreadPoolExecutor(max_workers=5,  thread_name_prefix="tg")
 
 # ─── PARIBU WEBSOCKET ───────────────────────────────────────────────────────
 PARIBU_WS_URL     = "wss://api.paribu.com/stream"
@@ -102,7 +104,8 @@ def get_gruplar():
     ]
 
 
-def telegram_gonder(chat_id, mesaj):
+def _telegram_gonder_blocking(chat_id, mesaj):
+    """Gerçek Telegram HTTP çağrısı — arka plan thread'inde çalışır"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         _session.post(url, json={
@@ -112,6 +115,15 @@ def telegram_gonder(chat_id, mesaj):
         }, timeout=10)
     except Exception as e:
         print(f"Telegram hata: {e}")
+
+
+def telegram_gonder(chat_id, mesaj):
+    """Non-blocking: Telegram çağrısını havuza atıp hemen döner.
+    Orderbook worker'ları Telegram API'sini beklemez."""
+    try:
+        TELEGRAM_POOL.submit(_telegram_gonder_blocking, chat_id, mesaj)
+    except Exception as e:
+        print(f"Telegram pool hata: {e}")
 
 
 def komut_dinleyici():
