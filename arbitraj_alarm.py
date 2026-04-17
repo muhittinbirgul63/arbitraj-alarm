@@ -80,6 +80,7 @@ paribu_ws_son     = {}              # {"BTC": timestamp} - son güncelleme
 paribu_ws_lock    = threading.Lock()
 paribu_markets    = []              # ["btc_tl", "eth_tl", ...]
 paribu_ws_bagli   = False
+paribu_ws_msg_sayac = 0             # Debug: ilk mesajları log'la
 
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
@@ -331,29 +332,52 @@ def kucoin_tumfiyatlar():
 
 
 def paribu_market_listesi_cek():
-    """İlk açılışta TL marketlerin listesini REST'ten bir kez çek"""
+    """TL marketlerin listesini çek. Önce resmi API, olmazsa www fallback."""
     global paribu_markets
+    markets = []
+
+    # 1. Önce resmi endpoint: api.paribu.com/market/ticker (array format)
+    try:
+        url = "https://api.paribu.com/market/ticker"
+        r = _session.get(url, timeout=10)
+        data = r.json()
+        if isinstance(data, list):
+            for item in data:
+                m = (item.get("market") or "").lower()
+                if m.endswith("_tl"):
+                    markets.append(m)
+            if markets:
+                paribu_markets = markets
+                print(f"Paribu: {len(markets)} TL marketi bulundu (resmi API)")
+                return True
+    except Exception as e:
+        print(f"Paribu resmi API market listesi hata: {e}")
+
+    # 2. Fallback: www.paribu.com/ticker (eski dict format)
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) "
                           "Chrome/131.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
             "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
         }
         url = f"https://www.paribu.com/ticker?_={int(time.time() * 1000)}"
         r = _session.get(url, headers=headers, timeout=10)
-        markets = []
-        for parite in r.json().keys():
-            if parite.endswith("_TL") or parite.endswith("_tl"):
-                markets.append(parite.lower())
-        paribu_markets = markets
-        print(f"Paribu: {len(markets)} TL marketi bulundu (market listesi)")
-        return True
+        data = r.json()
+        if isinstance(data, dict):
+            for parite in data.keys():
+                pl = parite.lower()
+                if pl.endswith("_tl"):
+                    markets.append(pl)
+            if markets:
+                paribu_markets = markets
+                print(f"Paribu: {len(markets)} TL marketi bulundu (www fallback)")
+                return True
     except Exception as e:
-        print(f"Paribu market listesi hata: {e}")
-        return False
+        print(f"Paribu www fallback hata: {e}")
+
+    print(f"Paribu market listesi alınamadı (0 market)")
+    return False
 
 
 def paribu_ws_on_open(ws):
@@ -379,7 +403,13 @@ def paribu_ws_on_open(ws):
 
 
 def paribu_ws_on_message(ws, message):
+    global paribu_ws_msg_sayac
     try:
+        # Debug: ilk 3 mesajı log'la (sonra susar)
+        paribu_ws_msg_sayac += 1
+        if paribu_ws_msg_sayac <= 3:
+            print(f"📨 Paribu WS mesaj #{paribu_ws_msg_sayac}: {message[:300]}")
+
         data = json.loads(message)
         if data.get("e") != "ticker24h":
             return
@@ -416,13 +446,13 @@ def paribu_ws_on_close(ws, close_status_code, close_msg):
 
 def paribu_ws_thread():
     """Arka plan thread'i — disconnect olursa otomatik yeniden bağlanır"""
-    # İlk açılışta market listesini çek
-    while not paribu_markets:
-        if paribu_market_listesi_cek():
-            break
-        time.sleep(15)
-
     while True:
+        # Market listesini tazele (ilk açılış ve her reconnect'te)
+        if not paribu_market_listesi_cek():
+            print("Paribu market listesi alınamadı, 30sn sonra tekrar denenecek...")
+            time.sleep(30)
+            continue
+
         try:
             ws = websocket.WebSocketApp(
                 PARIBU_WS_URL,
