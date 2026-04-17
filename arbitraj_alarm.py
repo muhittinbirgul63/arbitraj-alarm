@@ -545,12 +545,15 @@ def paribu_market_listesi_cek():
 def paribu_ws_on_open(ws):
     global paribu_ws_bagli
     paribu_ws_bagli = True
-    print(f"✅ Paribu WebSocket bağlandı, {len(paribu_markets)} kanala abone olunuyor...")
-    # Sunucuyu boğmamak için 50'şerli batch'ler halinde abone ol
-    BATCH = 50
+    print(f"✅ Paribu WebSocket bağlandı, {len(paribu_markets)*2} kanala abone olunuyor...")
+    # Hem ticker24h (last fiyat + hacim) hem orderbook (gerçek bid/ask) aboneliği
+    BATCH = 50  # market başına 2 kanal = batch başına 100 kanal
     for i in range(0, len(paribu_markets), BATCH):
         batch = paribu_markets[i:i+BATCH]
-        channels = [f"ticker24h:{m}@1000ms" for m in batch]
+        channels = []
+        for m in batch:
+            channels.append(f"ticker24h:{m}@1000ms")
+            channels.append(f"orderbook:{m}@1000ms")
         msg = {
             "method": "subscribe",
             "channels": channels,
@@ -567,25 +570,54 @@ def paribu_ws_on_open(ws):
 def paribu_ws_on_message(ws, message):
     try:
         data = json.loads(message)
-        if data.get("e") != "ticker24h":
-            return
+        event = data.get("e")
         symbol = data.get("s", "")
         if not symbol.endswith("_tl"):
             return
         coin = symbol[:-3].upper()
         r = data.get("r", {})
-        fiyat = float(r.get("c", 0))
-        if fiyat <= 0:
-            return
-        hacim_tl = float(r.get("q", 0))  # quote asset volume (TL cinsinden)
-        with paribu_ws_lock:
-            paribu_ws_cache[coin] = {
-                "fiyat": fiyat,
-                "ask":   fiyat,  # WS ticker'da bid/ask yok, son fiyatı kullan
-                "bid":   fiyat,
-                "hacim": hacim_tl,
-            }
-            paribu_ws_son[coin] = time.time()
+
+        if event == "ticker24h":
+            # Last fiyat ve 24h hacim bilgisi
+            fiyat = float(r.get("c", 0))
+            if fiyat <= 0:
+                return
+            hacim_tl = float(r.get("q", 0))
+            with paribu_ws_lock:
+                if coin in paribu_ws_cache:
+                    # Mevcut bid/ask'ı koru (orderbook'tan gelmişti), sadece fiyat/hacim güncelle
+                    paribu_ws_cache[coin]["fiyat"] = fiyat
+                    paribu_ws_cache[coin]["hacim"] = hacim_tl
+                else:
+                    # Henüz orderbook gelmemiş, geçici olarak last'ı bid/ask yerine kullan
+                    paribu_ws_cache[coin] = {
+                        "fiyat": fiyat, "ask": fiyat, "bid": fiyat, "hacim": hacim_tl,
+                    }
+                paribu_ws_son[coin] = time.time()
+
+        elif event == "orderbook":
+            # Gerçek best bid/ask — arbitraj için bu kritik
+            bids = r.get("b", [])
+            asks = r.get("a", [])
+            if not bids or not asks:
+                return
+            try:
+                bid = float(bids[0][0])
+                ask = float(asks[0][0])
+            except (ValueError, IndexError):
+                return
+            if bid <= 0 or ask <= 0:
+                return
+            with paribu_ws_lock:
+                if coin in paribu_ws_cache:
+                    paribu_ws_cache[coin]["ask"] = ask
+                    paribu_ws_cache[coin]["bid"] = bid
+                else:
+                    # Henüz ticker gelmemiş, mid price'ı fiyat olarak koy (geçici)
+                    paribu_ws_cache[coin] = {
+                        "fiyat": (bid + ask) / 2, "ask": ask, "bid": bid, "hacim": 0,
+                    }
+                paribu_ws_son[coin] = time.time()
     except Exception:
         pass  # Parse hataları çok sık log basmasın
 
