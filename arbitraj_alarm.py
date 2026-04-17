@@ -81,6 +81,17 @@ ORDERBOOK_POOL = ThreadPoolExecutor(max_workers=50, thread_name_prefix="ob")
 # Telegram mesajları için ayrı havuz — orderbook worker'ları Telegram'ı beklemesin
 TELEGRAM_POOL  = ThreadPoolExecutor(max_workers=5,  thread_name_prefix="tg")
 
+# TTL cache — rate limit yememek için fiyat verilerini 5sn boyunca cache'liyoruz
+# (tur 0.8sn'de bitiyor, yani 5sn = ~6 tur aynı cache ile çalışır, her 6. tur gerçek istek)
+CACHE_TTL = 5.0
+_binance_cache_data = {}; _binance_cache_time = 0
+_bybit_cache_data   = {}; _bybit_cache_time   = 0
+_mexc_cache_data    = {}; _mexc_cache_time    = 0
+_gate_cache_data    = {}; _gate_cache_time    = 0
+_okx_cache_data     = {}; _okx_cache_time     = 0
+_kucoin_cache_data  = {}; _kucoin_cache_time  = 0
+_btcturk_cache_data = {}; _btcturk_cache_time = 0
+
 # ─── PARIBU WEBSOCKET ───────────────────────────────────────────────────────
 PARIBU_WS_URL     = "wss://api.paribu.com/stream"
 paribu_ws_cache   = {}              # {"BTC": {"fiyat": ..., "ask": ..., "bid": ..., "hacim": ...}, ...}
@@ -199,6 +210,15 @@ def fiyat_formatla(fiyat):
 # ─── BORSA FİYAT FONKSİYONLARI ───────────────────────────────────────────────
 
 def binance_tumfiyatlar():
+    """Binance /ticker/24hr endpoint'i 40 request weight harcıyor.
+    Her turda çağırmak yerine 5sn TTL'li cache kullanıyoruz.
+    Dakikada ~12 çağrı = 480 weight (6000 limitin çok altında)."""
+    global _binance_cache_data, _binance_cache_time
+    simdi = time.time()
+    # Cache taze ise direkt dön
+    if _binance_cache_data and (simdi - _binance_cache_time) < 5:
+        return _binance_cache_data
+
     # Binance birden çok endpoint'i var, Türkiye/bazı IP'lerden erişim için fallback
     endpoints = [
         "https://api.binance.com/api/v3/ticker/24hr",
@@ -249,6 +269,8 @@ def binance_tumfiyatlar():
                             }
                     except: pass
             if sonuc:
+                _binance_cache_data = sonuc
+                _binance_cache_time = simdi
                 borsa_hata_kontrol("Binance", True)
                 return sonuc
         except Exception as e:
@@ -257,10 +279,15 @@ def binance_tumfiyatlar():
 
     print(f"Binance hata: {son_hata}")
     borsa_hata_kontrol("Binance", False)
-    return {}
+    # Hata durumunda eski cache'i döndür (varsa), tamamen boş bırakma
+    return _binance_cache_data if _binance_cache_data else {}
 
 
 def gate_tumfiyatlar():
+    global _gate_cache_data, _gate_cache_time
+    simdi = time.time()
+    if _gate_cache_data and (simdi - _gate_cache_time) < CACHE_TTL:
+        return _gate_cache_data
     try:
         r = _session.get("https://api.gateio.ws/api/v4/spot/tickers", timeout=10)
         sonuc = {}
@@ -281,15 +308,21 @@ def gate_tumfiyatlar():
                             "bid":   bid if bid > 0 else fiyat,
                         }
                 except: pass
+        _gate_cache_data = sonuc
+        _gate_cache_time = simdi
         borsa_hata_kontrol("Gate", True)
         return sonuc
     except Exception as e:
         print(f"Gate hata: {e}")
         borsa_hata_kontrol("Gate", False)
-        return {}
+        return _gate_cache_data if _gate_cache_data else {}
 
 
 def mexc_tumfiyatlar():
+    global _mexc_cache_data, _mexc_cache_time
+    simdi = time.time()
+    if _mexc_cache_data and (simdi - _mexc_cache_time) < CACHE_TTL:
+        return _mexc_cache_data
     try:
         r = _session.get("https://api.mexc.com/api/v3/ticker/24hr", timeout=15)
         sonuc = {}
@@ -312,15 +345,21 @@ def mexc_tumfiyatlar():
                             "bid":   bid if bid > 0 else fiyat,
                         }
                 except: pass
+        _mexc_cache_data = sonuc
+        _mexc_cache_time = simdi
         borsa_hata_kontrol("MEXC", True)
         return sonuc
     except Exception as e:
         print(f"MEXC hata: {e}")
         borsa_hata_kontrol("MEXC", False)
-        return {}
+        return _mexc_cache_data if _mexc_cache_data else {}
 
 
 def okx_tumfiyatlar():
+    global _okx_cache_data, _okx_cache_time
+    simdi = time.time()
+    if _okx_cache_data and (simdi - _okx_cache_time) < CACHE_TTL:
+        return _okx_cache_data
     try:
         r = _session.get("https://www.okx.com/api/v5/market/tickers",
                          params={"instType": "SPOT"}, timeout=10)
@@ -342,15 +381,21 @@ def okx_tumfiyatlar():
                             "bid":   bid if bid > 0 else fiyat,
                         }
                 except: pass
+        _okx_cache_data = sonuc
+        _okx_cache_time = simdi
         borsa_hata_kontrol("OKX", True)
         return sonuc
     except Exception as e:
         print(f"OKX hata: {e}")
         borsa_hata_kontrol("OKX", False)
-        return {}
+        return _okx_cache_data if _okx_cache_data else {}
 
 
 def kucoin_tumfiyatlar():
+    global _kucoin_cache_data, _kucoin_cache_time
+    simdi = time.time()
+    if _kucoin_cache_data and (simdi - _kucoin_cache_time) < CACHE_TTL:
+        return _kucoin_cache_data
     try:
         r = _session.get("https://api.kucoin.com/api/v1/market/allTickers", timeout=15)
         sonuc = {}
@@ -372,12 +417,14 @@ def kucoin_tumfiyatlar():
                             "bid":   bid if bid > 0 else fiyat,
                         }
                 except: pass
+        _kucoin_cache_data = sonuc
+        _kucoin_cache_time = simdi
         borsa_hata_kontrol("KuCoin", True)
         return sonuc
     except Exception as e:
         print(f"KuCoin hata: {e}")
         borsa_hata_kontrol("KuCoin", False)
-        return {}
+        return _kucoin_cache_data if _kucoin_cache_data else {}
 
 
 def paribu_market_listesi_cek():
@@ -542,6 +589,11 @@ def paribu_tumfiyatlar():
 def bybit_tumfiyatlar():
     # Bybit V5 API - tüm spot tickers tek çağrıda
     # Bazı bölgelerde api.bybit.com bloklanıyor, api.bytick.com fallback
+    global _bybit_cache_data, _bybit_cache_time
+    simdi = time.time()
+    if _bybit_cache_data and (simdi - _bybit_cache_time) < CACHE_TTL:
+        return _bybit_cache_data
+
     endpoints = [
         "https://api.bybit.com/v5/market/tickers",
         "https://api.bytick.com/v5/market/tickers",
@@ -590,6 +642,8 @@ def bybit_tumfiyatlar():
                                 "bid":   bid if bid > 0 else fiyat,
                             }
                     except: pass
+            _bybit_cache_data = sonuc
+            _bybit_cache_time = simdi
             borsa_hata_kontrol("Bybit", True)
             return sonuc
         except Exception as e:
@@ -599,10 +653,14 @@ def bybit_tumfiyatlar():
     # Tüm endpoint'ler başarısız
     print(f"Bybit hata: {son_hata}")
     borsa_hata_kontrol("Bybit", False)
-    return {}
+    return _bybit_cache_data if _bybit_cache_data else {}
 
 
 def btcturk_tumfiyatlar():
+    global _btcturk_cache_data, _btcturk_cache_time
+    simdi = time.time()
+    if _btcturk_cache_data and (simdi - _btcturk_cache_time) < CACHE_TTL:
+        return _btcturk_cache_data
     try:
         r = _session.get("https://api.btcturk.com/api/v2/ticker", timeout=10)
         sonuc = {}
@@ -617,12 +675,14 @@ def btcturk_tumfiyatlar():
                     if fiyat > 0:
                         sonuc[coin] = {"fiyat": fiyat, "ask": ask, "bid": bid, "hacim": hacim}
                 except: pass
+        _btcturk_cache_data = sonuc
+        _btcturk_cache_time = simdi
         borsa_hata_kontrol("BTCTürk", True)
         return sonuc
     except Exception as e:
         print(f"BTCTürk hata: {e}")
         borsa_hata_kontrol("BTCTürk", False)
-        return {}
+        return _btcturk_cache_data if _btcturk_cache_data else {}
 
 
 # ─── ORDERBOOK FONKSİYONLARI ─────────────────────────────────────────────────
