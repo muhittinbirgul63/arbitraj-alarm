@@ -322,7 +322,19 @@ def kucoin_tumfiyatlar():
 
 def paribu_tumfiyatlar():
     try:
-        r = _session.get("https://www.paribu.com/ticker", timeout=10)
+        # Cache-bust + browser User-Agent + no-cache header'ları
+        # (Railway IP'si CDN tarafında cache'leniyordu, hep aynı fiyat dönüyordu)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+        url = f"https://www.paribu.com/ticker?_={int(time.time() * 1000)}"
+        r = _session.get(url, headers=headers, timeout=10)
         sonuc = {}
         for parite, bilgi in r.json().items():
             if parite.endswith("_TL") or parite.endswith("_tl"):
