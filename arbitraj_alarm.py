@@ -33,6 +33,7 @@ GATE_HARIC    = {"FB"}
 BINANCE_HARIC = {"GAL"}
 OKX_HARIC     = set()
 KUCOIN_HARIC  = {"FB"}
+BYBIT_HARIC   = set()
 
 MIN_HACIM_USDT = 100_000
 
@@ -72,6 +73,7 @@ binance_cache = {}
 gate_cache    = {}
 mexc_cache    = {}
 kucoin_cache  = {}
+bybit_cache   = {}
 
 # ─── PARIBU WEBSOCKET ───────────────────────────────────────────────────────
 PARIBU_WS_URL     = "wss://api.paribu.com/stream"
@@ -490,6 +492,41 @@ def paribu_tumfiyatlar():
         return {}
 
 
+def bybit_tumfiyatlar():
+    try:
+        # Bybit V5 API - tüm spot tickers tek çağrıda
+        r = _session.get("https://api.bybit.com/v5/market/tickers",
+                        params={"category": "spot"}, timeout=10)
+        data = r.json()
+        if data.get("retCode") != 0:
+            raise Exception(f"retCode={data.get('retCode')}: {data.get('retMsg')}")
+        sonuc = {}
+        for item in data.get("result", {}).get("list", []):
+            sym = item.get("symbol", "")
+            if sym.endswith("USDT"):
+                coin = sym[:-4]
+                if coin in BYBIT_HARIC: continue
+                try:
+                    fiyat = float(item.get("lastPrice", 0) or 0)
+                    hacim = float(item.get("turnover24h", 0) or 0)  # USDT cinsinden 24h hacim
+                    ask   = float(item.get("ask1Price", 0) or 0)
+                    bid   = float(item.get("bid1Price", 0) or 0)
+                    if fiyat > 0:
+                        sonuc[coin] = {
+                            "fiyat": fiyat,
+                            "hacim": hacim,
+                            "ask":   ask if ask > 0 else fiyat,
+                            "bid":   bid if bid > 0 else fiyat,
+                        }
+                except: pass
+        borsa_hata_kontrol("Bybit", True)
+        return sonuc
+    except Exception as e:
+        print(f"Bybit hata: {e}")
+        borsa_hata_kontrol("Bybit", False)
+        return {}
+
+
 def btcturk_tumfiyatlar():
     try:
         r = _session.get("https://api.btcturk.com/api/v2/ticker", timeout=10)
@@ -552,6 +589,13 @@ def orderbook_ask(borsa, coin):
             r = _session.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
                            params={"symbol": f"{coin}-USDT"}, timeout=5)
             return float(r.json()["data"]["bestAsk"])
+        elif borsa == "Bybit":
+            veri = bybit_cache.get(coin)
+            if veri and veri.get("ask", 0) > 0:
+                return veri["ask"]
+            r = _session.get("https://api.bybit.com/v5/market/orderbook",
+                           params={"category": "spot", "symbol": f"{coin}USDT", "limit": 1}, timeout=5)
+            return float(r.json()["result"]["a"][0][0])
     except: pass
     return None
 
@@ -592,6 +636,13 @@ def orderbook_bid(borsa, coin):
             r = _session.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
                            params={"symbol": f"{coin}-USDT"}, timeout=5)
             return float(r.json()["data"]["bestBid"])
+        elif borsa == "Bybit":
+            veri = bybit_cache.get(coin)
+            if veri and veri.get("bid", 0) > 0:
+                return veri["bid"]
+            r = _session.get("https://api.bybit.com/v5/market/orderbook",
+                           params={"category": "spot", "symbol": f"{coin}USDT", "limit": 1}, timeout=5)
+            return float(r.json()["result"]["b"][0][0])
     except: pass
     return None
 
@@ -853,7 +904,7 @@ def bot_calistir():
 
     telegram_gonder(os.getenv("CHAT_ID_06"),
         f"✅ <b>Arbitraj Alarm Botu v5 Başladı</b>\n"
-        f"🏦 Binance, Gate, MEXC, OKX, KuCoin\n"
+        f"🏦 Binance, Gate, MEXC, OKX, KuCoin, Bybit\n"
         f"🇹🇷 Paribu ↔ BTCTürk\n"
         f"📊 %0.6 / 📈 %1.5 / 🚀 %4.0\n"
         f"🛡 Kademeli ban sistemi aktif\n"
@@ -882,6 +933,7 @@ def bot_calistir():
             threading.Thread(target=cek, args=("mexc",    mexc_tumfiyatlar)),
             threading.Thread(target=cek, args=("okx",     okx_tumfiyatlar)),
             threading.Thread(target=cek, args=("kucoin",  kucoin_tumfiyatlar)),
+            threading.Thread(target=cek, args=("bybit",   bybit_tumfiyatlar)),
             threading.Thread(target=cek, args=("paribu",  paribu_tumfiyatlar)),
             threading.Thread(target=cek, args=("btcturk", btcturk_tumfiyatlar)),
         ]
@@ -893,6 +945,7 @@ def bot_calistir():
         mexc    = sonuclar.get("mexc",    {})
         okx     = sonuclar.get("okx",     {})
         kucoin  = sonuclar.get("kucoin",  {})
+        bybit   = sonuclar.get("bybit",   {})
         paribu  = sonuclar.get("paribu",  {})
         btcturk = sonuclar.get("btcturk", {})
 
@@ -902,6 +955,7 @@ def bot_calistir():
         gate_cache.clear();    gate_cache.update(gate)
         mexc_cache.clear();    mexc_cache.update(mexc)
         kucoin_cache.clear();  kucoin_cache.update(kucoin)
+        bybit_cache.clear();   bybit_cache.update(bybit)
 
         kur = usdt_tl_kuru(paribu, btcturk)
         if not kur:
@@ -909,7 +963,7 @@ def bot_calistir():
             time.sleep(10)
             continue
 
-        print(f"USDT/TL: {kur:.2f} | Paribu: {len(paribu)} | BTCTürk: {len(btcturk)} | KuCoin: {len(kucoin)} coin")
+        print(f"USDT/TL: {kur:.2f} | Paribu: {len(paribu)} | BTCTürk: {len(btcturk)} | Binance: {len(binance)} | Bybit: {len(bybit)} coin")
 
         tl_coinler = (set(paribu.keys()) | set(btcturk.keys())) - {"USDT"}
 
@@ -919,6 +973,7 @@ def bot_calistir():
             "MEXC":    mexc,
             "OKX":     okx,
             "KuCoin":  kucoin,
+            "Bybit":   bybit,
         }
 
         # ── 1. Hızlı ön tarama (orderbook yok) ──
