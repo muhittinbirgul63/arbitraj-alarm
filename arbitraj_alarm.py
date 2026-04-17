@@ -1139,8 +1139,9 @@ def bot_calistir():
             wait(futures, timeout=10)
 
         tur_suresi = time.time() - tur_baslangic
-        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Tur tamamlandı. ({tur_suresi:.1f}sn)")
-        time.sleep(0.3)
+        print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Tur tamamlandı. ({tur_suresi:.2f}sn)")
+        # Saniyede 1 tur — Paribu WS ile senkron, CPU tasarrufu, log temizliği
+        time.sleep(max(0, 1.0 - tur_suresi))
 
 
 if __name__ == "__main__":
