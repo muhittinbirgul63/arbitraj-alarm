@@ -13,6 +13,7 @@ import requests
 import time
 import os
 import json
+import signal
 import threading
 import websocket  # pip install websocket-client
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -76,21 +77,117 @@ mexc_cache    = {}
 kucoin_cache  = {}
 bybit_cache   = {}
 
+# Graceful shutdown — SIGTERM/SIGINT alındığında set edilir, ana döngü çıkar
+_shutdown = threading.Event()
+
 # Orderbook adayları için sabit worker havuzu (her tur 1000+ thread yaratmamak için)
 ORDERBOOK_POOL = ThreadPoolExecutor(max_workers=50, thread_name_prefix="ob")
 # Telegram mesajları için ayrı havuz — orderbook worker'ları Telegram'ı beklemesin
 TELEGRAM_POOL  = ThreadPoolExecutor(max_workers=5,  thread_name_prefix="tg")
 
-# TTL cache — rate limit yememek için fiyat verilerini 5sn boyunca cache'liyoruz
-# (tur 0.8sn'de bitiyor, yani 5sn = ~6 tur aynı cache ile çalışır, her 6. tur gerçek istek)
+# TTL cache — tur 0.04sn'de bitiyor, borsaları 5sn'de bir taze çekmek rate limit için yeterli
 CACHE_TTL = 5.0
-_binance_cache_data = {}; _binance_cache_time = 0
-_bybit_cache_data   = {}; _bybit_cache_time   = 0
-_mexc_cache_data    = {}; _mexc_cache_time    = 0
-_gate_cache_data    = {}; _gate_cache_time    = 0
-_okx_cache_data     = {}; _okx_cache_time     = 0
-_kucoin_cache_data  = {}; _kucoin_cache_time  = 0
-_btcturk_cache_data = {}; _btcturk_cache_time = 0
+
+
+def ttl_cache(ttl=CACHE_TTL):
+    """Borsa fiyat fonksiyonlarına TTL cache uygular.
+    - Dönen dict boş değilse cache'ler
+    - Fonksiyon boş dict dönerse (hata), son başarılı cache'i döner"""
+    def decorator(func):
+        state = {"data": {}, "time": 0}
+        def wrapper(*args, **kwargs):
+            simdi = time.time()
+            if state["data"] and (simdi - state["time"]) < ttl:
+                return state["data"]
+            sonuc = func(*args, **kwargs)
+            if sonuc:
+                state["data"] = sonuc
+                state["time"] = simdi
+                return sonuc
+            return state["data"]  # Hata: eski cache'i dön (başta {} olur)
+        return wrapper
+    return decorator
+
+
+# ─── CONFIG KONTROLÜ ────────────────────────────────────────────────────────
+
+def _config_kontrol_et():
+    """Başlangıçta kritik env var'ların varlığını kontrol eder.
+    Eksik varsa net hata verip çıkar — sessiz çalışıp mesaj kaybetmek yerine."""
+    zorunlu = {
+        "TELEGRAM_TOKEN": "Telegram bot token (BotFather'dan al)",
+        "CHAT_ID_06":     "%0.6 alarm grubu chat ID'si",
+    }
+    eksik = [f"  - {k}: {a}" for k, a in zorunlu.items() if not os.getenv(k)]
+    if eksik:
+        print("❌ Eksik environment variable'lar:")
+        for line in eksik:
+            print(line)
+        print("\nRailway → Variables sekmesinden eklemen gerekiyor.")
+        raise SystemExit(1)
+
+    # Opsiyonel — uyarı ver ama durdurmazsın
+    if not os.getenv("CHAT_ID_15"):
+        print("⚠️  CHAT_ID_15 yok, %1.5 alarmları CHAT_ID_06'ya gidecek")
+    if not os.getenv("CHAT_ID_40"):
+        print("⚠️  CHAT_ID_40 yok, %4.0 alarmları CHAT_ID_06'ya gidecek")
+    print("✅ Config kontrolü tamam")
+
+
+# ─── GRACEFUL SHUTDOWN ──────────────────────────────────────────────────────
+
+def _sinyal_handler(signum, frame):
+    """SIGTERM (Railway deploy) veya SIGINT (Ctrl+C) alındığında tetiklenir"""
+    if not _shutdown.is_set():
+        print(f"\n🛑 Sinyal {signum} alındı, temiz kapanma başlıyor...")
+        _shutdown.set()
+
+
+signal.signal(signal.SIGTERM, _sinyal_handler)
+signal.signal(signal.SIGINT,  _sinyal_handler)
+
+
+# ─── PERİYODİK TEMİZLİK (memory leak önleme) ────────────────────────────────
+
+def periyodik_temizlik():
+    """Her saatte bir eski kayıtları siler — RAM şişmesini önler.
+    Haftalarca çalışan bot için önemli."""
+    while not _shutdown.is_set():
+        if _shutdown.wait(3600):  # 1 saat bekle, shutdown sinyalinde hemen çık
+            break
+        simdi = time.time()
+        silinen = 0
+
+        # son_bildirim: 1 günden eski kayıtlar (artık hiç gelmeyen coinler)
+        for k in list(son_bildirim.keys()):
+            if simdi - son_bildirim[k] > 86400:
+                del son_bildirim[k]
+                silinen += 1
+
+        # coin_sayac: liste boşaldıysa veya hepsi eski ise
+        for k in list(coin_sayac.keys()):
+            coin_sayac[k] = [t for t in coin_sayac[k] if simdi - t < SPAM_SURE]
+            if not coin_sayac[k]:
+                del coin_sayac[k]
+                silinen += 1
+
+        # coin_ban: süresi dolmuş ban'ler
+        for k in list(coin_ban.keys()):
+            if coin_ban[k] < simdi:
+                del coin_ban[k]
+                silinen += 1
+
+        # ban_seviye: artık aktif olmayan coinler
+        for k in list(ban_seviye.keys()):
+            if k not in coin_ban and k not in son_bildirim:
+                del ban_seviye[k]
+                silinen += 1
+
+        if silinen > 0:
+            print(f"[TEMİZLİK] {silinen} eski kayıt silindi, "
+                  f"aktif: son_bildirim={len(son_bildirim)} "
+                  f"coin_sayac={len(coin_sayac)} coin_ban={len(coin_ban)}")
+
 
 # ─── PARIBU WEBSOCKET ───────────────────────────────────────────────────────
 PARIBU_WS_URL     = "wss://api.paribu.com/stream"
@@ -99,7 +196,6 @@ paribu_ws_son     = {}              # {"BTC": timestamp} - son güncelleme
 paribu_ws_lock    = threading.Lock()
 paribu_markets    = []              # ["btc_tl", "eth_tl", ...]
 paribu_ws_bagli   = False
-paribu_ws_msg_sayac = 0             # Debug: ilk mesajları log'la
 
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
@@ -209,17 +305,10 @@ def fiyat_formatla(fiyat):
 
 # ─── BORSA FİYAT FONKSİYONLARI ───────────────────────────────────────────────
 
+@ttl_cache()
 def binance_tumfiyatlar():
-    """Binance /ticker/24hr endpoint'i 40 request weight harcıyor.
-    Her turda çağırmak yerine 5sn TTL'li cache kullanıyoruz.
-    Dakikada ~12 çağrı = 480 weight (6000 limitin çok altında)."""
-    global _binance_cache_data, _binance_cache_time
-    simdi = time.time()
-    # Cache taze ise direkt dön
-    if _binance_cache_data and (simdi - _binance_cache_time) < 5:
-        return _binance_cache_data
-
-    # Binance birden çok endpoint'i var, Türkiye/bazı IP'lerden erişim için fallback
+    """Binance /ticker/24hr — 40 weight/çağrı. Cache ile dakikada ~12 çağrı = 480 weight."""
+    # Türkiye/bazı IP'lerden erişim için çoklu endpoint fallback
     endpoints = [
         "https://api.binance.com/api/v3/ticker/24hr",
         "https://api1.binance.com/api/v3/ticker/24hr",
@@ -269,8 +358,6 @@ def binance_tumfiyatlar():
                             }
                     except: pass
             if sonuc:
-                _binance_cache_data = sonuc
-                _binance_cache_time = simdi
                 borsa_hata_kontrol("Binance", True)
                 return sonuc
         except Exception as e:
@@ -279,15 +366,11 @@ def binance_tumfiyatlar():
 
     print(f"Binance hata: {son_hata}")
     borsa_hata_kontrol("Binance", False)
-    # Hata durumunda eski cache'i döndür (varsa), tamamen boş bırakma
-    return _binance_cache_data if _binance_cache_data else {}
+    return {}
 
 
+@ttl_cache()
 def gate_tumfiyatlar():
-    global _gate_cache_data, _gate_cache_time
-    simdi = time.time()
-    if _gate_cache_data and (simdi - _gate_cache_time) < CACHE_TTL:
-        return _gate_cache_data
     try:
         r = _session.get("https://api.gateio.ws/api/v4/spot/tickers", timeout=10)
         sonuc = {}
@@ -308,21 +391,16 @@ def gate_tumfiyatlar():
                             "bid":   bid if bid > 0 else fiyat,
                         }
                 except: pass
-        _gate_cache_data = sonuc
-        _gate_cache_time = simdi
         borsa_hata_kontrol("Gate", True)
         return sonuc
     except Exception as e:
         print(f"Gate hata: {e}")
         borsa_hata_kontrol("Gate", False)
-        return _gate_cache_data if _gate_cache_data else {}
+        return {}
 
 
+@ttl_cache()
 def mexc_tumfiyatlar():
-    global _mexc_cache_data, _mexc_cache_time
-    simdi = time.time()
-    if _mexc_cache_data and (simdi - _mexc_cache_time) < CACHE_TTL:
-        return _mexc_cache_data
     try:
         r = _session.get("https://api.mexc.com/api/v3/ticker/24hr", timeout=15)
         sonuc = {}
@@ -345,21 +423,16 @@ def mexc_tumfiyatlar():
                             "bid":   bid if bid > 0 else fiyat,
                         }
                 except: pass
-        _mexc_cache_data = sonuc
-        _mexc_cache_time = simdi
         borsa_hata_kontrol("MEXC", True)
         return sonuc
     except Exception as e:
         print(f"MEXC hata: {e}")
         borsa_hata_kontrol("MEXC", False)
-        return _mexc_cache_data if _mexc_cache_data else {}
+        return {}
 
 
+@ttl_cache()
 def okx_tumfiyatlar():
-    global _okx_cache_data, _okx_cache_time
-    simdi = time.time()
-    if _okx_cache_data and (simdi - _okx_cache_time) < CACHE_TTL:
-        return _okx_cache_data
     try:
         r = _session.get("https://www.okx.com/api/v5/market/tickers",
                          params={"instType": "SPOT"}, timeout=10)
@@ -381,21 +454,16 @@ def okx_tumfiyatlar():
                             "bid":   bid if bid > 0 else fiyat,
                         }
                 except: pass
-        _okx_cache_data = sonuc
-        _okx_cache_time = simdi
         borsa_hata_kontrol("OKX", True)
         return sonuc
     except Exception as e:
         print(f"OKX hata: {e}")
         borsa_hata_kontrol("OKX", False)
-        return _okx_cache_data if _okx_cache_data else {}
+        return {}
 
 
+@ttl_cache()
 def kucoin_tumfiyatlar():
-    global _kucoin_cache_data, _kucoin_cache_time
-    simdi = time.time()
-    if _kucoin_cache_data and (simdi - _kucoin_cache_time) < CACHE_TTL:
-        return _kucoin_cache_data
     try:
         r = _session.get("https://api.kucoin.com/api/v1/market/allTickers", timeout=15)
         sonuc = {}
@@ -417,14 +485,12 @@ def kucoin_tumfiyatlar():
                             "bid":   bid if bid > 0 else fiyat,
                         }
                 except: pass
-        _kucoin_cache_data = sonuc
-        _kucoin_cache_time = simdi
         borsa_hata_kontrol("KuCoin", True)
         return sonuc
     except Exception as e:
         print(f"KuCoin hata: {e}")
         borsa_hata_kontrol("KuCoin", False)
-        return _kucoin_cache_data if _kucoin_cache_data else {}
+        return {}
 
 
 def paribu_market_listesi_cek():
@@ -499,13 +565,7 @@ def paribu_ws_on_open(ws):
 
 
 def paribu_ws_on_message(ws, message):
-    global paribu_ws_msg_sayac
     try:
-        # Debug: ilk 3 mesajı log'la (sonra susar)
-        paribu_ws_msg_sayac += 1
-        if paribu_ws_msg_sayac <= 3:
-            print(f"📨 Paribu WS mesaj #{paribu_ws_msg_sayac}: {message[:300]}")
-
         data = json.loads(message)
         if data.get("e") != "ticker24h":
             return
@@ -526,7 +586,7 @@ def paribu_ws_on_message(ws, message):
                 "hacim": hacim_tl,
             }
             paribu_ws_son[coin] = time.time()
-    except Exception as e:
+    except Exception:
         pass  # Parse hataları çok sık log basmasın
 
 
@@ -586,14 +646,9 @@ def paribu_tumfiyatlar():
         return {}
 
 
+@ttl_cache()
 def bybit_tumfiyatlar():
-    # Bybit V5 API - tüm spot tickers tek çağrıda
-    # Bazı bölgelerde api.bybit.com bloklanıyor, api.bytick.com fallback
-    global _bybit_cache_data, _bybit_cache_time
-    simdi = time.time()
-    if _bybit_cache_data and (simdi - _bybit_cache_time) < CACHE_TTL:
-        return _bybit_cache_data
-
+    """Bybit V5 spot tickers. api.bybit.com bloklu bölgelerde api.bytick.com fallback."""
     endpoints = [
         "https://api.bybit.com/v5/market/tickers",
         "https://api.bytick.com/v5/market/tickers",
@@ -642,25 +697,19 @@ def bybit_tumfiyatlar():
                                 "bid":   bid if bid > 0 else fiyat,
                             }
                     except: pass
-            _bybit_cache_data = sonuc
-            _bybit_cache_time = simdi
             borsa_hata_kontrol("Bybit", True)
             return sonuc
         except Exception as e:
             son_hata = f"{url} exception: {e}"
             continue
 
-    # Tüm endpoint'ler başarısız
     print(f"Bybit hata: {son_hata}")
     borsa_hata_kontrol("Bybit", False)
-    return _bybit_cache_data if _bybit_cache_data else {}
+    return {}
 
 
+@ttl_cache()
 def btcturk_tumfiyatlar():
-    global _btcturk_cache_data, _btcturk_cache_time
-    simdi = time.time()
-    if _btcturk_cache_data and (simdi - _btcturk_cache_time) < CACHE_TTL:
-        return _btcturk_cache_data
     try:
         r = _session.get("https://api.btcturk.com/api/v2/ticker", timeout=10)
         sonuc = {}
@@ -675,14 +724,12 @@ def btcturk_tumfiyatlar():
                     if fiyat > 0:
                         sonuc[coin] = {"fiyat": fiyat, "ask": ask, "bid": bid, "hacim": hacim}
                 except: pass
-        _btcturk_cache_data = sonuc
-        _btcturk_cache_time = simdi
         borsa_hata_kontrol("BTCTürk", True)
         return sonuc
     except Exception as e:
         print(f"BTCTürk hata: {e}")
         borsa_hata_kontrol("BTCTürk", False)
-        return _btcturk_cache_data if _btcturk_cache_data else {}
+        return {}
 
 
 # ─── ORDERBOOK FONKSİYONLARI ─────────────────────────────────────────────────
@@ -1019,11 +1066,14 @@ def bot_calistir():
 
     print("Arbitraj Alarm Botu v5 başlatılıyor...")
 
-    # Paribu WebSocket thread'i (arka planda sürekli çalışır)
+    # 1. Config kontrolü — eksik env var varsa hemen çık
+    _config_kontrol_et()
+
+    # 2. Paribu WebSocket thread'i (arka planda sürekli çalışır)
     ws_thread = threading.Thread(target=paribu_ws_thread, daemon=True)
     ws_thread.start()
 
-    # İlk Paribu datası gelene kadar bekle (max 20sn)
+    # 3. İlk Paribu datası gelene kadar bekle (max 20sn)
     print("Paribu WebSocket ilk veriler bekleniyor...")
     bekleme_basladi = time.time()
     while time.time() - bekleme_basladi < 20:
@@ -1034,8 +1084,13 @@ def bot_calistir():
     with paribu_ws_lock:
         print(f"Paribu WS: {len(paribu_ws_cache)} coin hazır, ana döngü başlıyor")
 
+    # 4. Telegram komut dinleyici
     komut_thread = threading.Thread(target=komut_dinleyici, daemon=True)
     komut_thread.start()
+
+    # 5. Periyodik memory temizlik (her saatte bir)
+    temizlik_thread = threading.Thread(target=periyodik_temizlik, daemon=True)
+    temizlik_thread.start()
 
     telegram_gonder(os.getenv("CHAT_ID_06"),
         f"✅ <b>Arbitraj Alarm Botu v5 Başladı</b>\n"
@@ -1046,7 +1101,7 @@ def bot_calistir():
         f"💱 Min hacim: ${MIN_HACIM_USDT:,}"
     )
 
-    while True:
+    while not _shutdown.is_set():
         # Durum kontrolü
         if time.time() - son_durum_kontrol >= DURUM_KONTROL_SURESI:
             durum_kontrol_et()
@@ -1140,8 +1195,16 @@ def bot_calistir():
 
         tur_suresi = time.time() - tur_baslangic
         print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Tur tamamlandı. ({tur_suresi:.2f}sn)")
-        # Saniyede 1 tur — Paribu WS ile senkron, CPU tasarrufu, log temizliği
-        time.sleep(max(0, 1.0 - tur_suresi))
+        # Saniyede 1 tur — shutdown sinyali gelirse hemen çıkar
+        if _shutdown.wait(max(0.01, 1.0 - tur_suresi)):
+            break
+
+    # ─── Temiz kapanış ─────────────────────────────────────────────────────
+    print("📤 Son Telegram mesajları gönderiliyor...")
+    TELEGRAM_POOL.shutdown(wait=True)  # kuyruktaki mesajlar gitsin
+    print("🧹 Worker havuzları kapatılıyor...")
+    ORDERBOOK_POOL.shutdown(wait=False, cancel_futures=True)
+    print("✅ Bot temiz kapandı")
 
 
 if __name__ == "__main__":
