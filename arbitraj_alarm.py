@@ -29,10 +29,12 @@ TZ_TR = timezone(timedelta(hours=3))
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ADMIN_ID       = str(os.getenv("ADMIN_ID", "1072335473"))
 
-# Borsalarda farklı token olan coinler
+# Borsalarda farklı token olan veya delisted coinler
 MEXC_HARIC    = {"FB"}
 GATE_HARIC    = {"FB"}
-BINANCE_HARIC = {"GAL"}
+# 1 Nisan 2026'da Binance'ten delisted: A2Z, FORTH, HOOK, IDEX, LRC, NTRN, RDNT, SXP
+# GAL: farklı token
+BINANCE_HARIC = {"GAL", "A2Z", "FORTH", "HOOK", "IDEX", "LRC", "NTRN", "RDNT", "SXP"}
 OKX_HARIC     = set()
 KUCOIN_HARIC  = {"FB"}
 BYBIT_HARIC   = set()
@@ -344,6 +346,11 @@ def binance_tumfiyatlar():
                 if sym.endswith("USDT"):
                     coin = sym[:-4]
                     if coin in BINANCE_HARIC: continue
+                    # Delisted coinleri otomatik atla: count = 24h işlem sayısı
+                    # Delisted olunca count=0 olur, fiyat eski kalır (zombi entry)
+                    count = item.get("count")
+                    if count is not None and int(count) == 0:
+                        continue
                     try:
                         fiyat = float(item["lastPrice"])
                         hacim = float(item["quoteVolume"])
@@ -410,6 +417,10 @@ def mexc_tumfiyatlar():
             if sym.endswith("USDT"):
                 coin = sym[:-4]
                 if coin in MEXC_HARIC: continue
+                # Delisted coinleri otomatik atla (count = 0)
+                count = item.get("count")
+                if count is not None and int(count) == 0:
+                    continue
                 try:
                     fiyat = float(item.get("lastPrice", 0))
                     hacim = float(item.get("quoteVolume", 0))
