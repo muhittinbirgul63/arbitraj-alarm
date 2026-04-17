@@ -15,6 +15,7 @@ import os
 import json
 import threading
 import websocket  # pip install websocket-client
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
@@ -74,6 +75,9 @@ gate_cache    = {}
 mexc_cache    = {}
 kucoin_cache  = {}
 bybit_cache   = {}
+
+# Orderbook adayları için sabit worker havuzu (her tur 1000+ thread yaratmamak için)
+ORDERBOOK_POOL = ThreadPoolExecutor(max_workers=50, thread_name_prefix="ob")
 
 # ─── PARIBU WEBSOCKET ───────────────────────────────────────────────────────
 PARIBU_WS_URL     = "wss://api.paribu.com/stream"
@@ -1057,16 +1061,14 @@ def bot_calistir():
         # ── 2. Adaylar için orderbook'ları paralel çek ──
         if adaylar:
             print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] {len(adaylar)} aday bulundu, orderbook çekiliyor...")
-            ob_threadler = [
-                threading.Thread(target=karsilastir_orderbook, args=(aday,))
-                for aday in adaylar
-            ]
-            for t in ob_threadler: t.start()
-            for t in ob_threadler: t.join(timeout=10)
+            # ThreadPool ile 1000+ thread yaratma maliyetini ortadan kaldır
+            futures = [ORDERBOOK_POOL.submit(karsilastir_orderbook, aday) for aday in adaylar]
+            # Max 10sn bekle, uzun süren thread'leri bırak (bir sonraki turda yine denenir)
+            wait(futures, timeout=10)
 
         tur_suresi = time.time() - tur_baslangic
         print(f"[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Tur tamamlandı. ({tur_suresi:.1f}sn)")
-        time.sleep(1)
+        time.sleep(0.3)
 
 
 if __name__ == "__main__":
