@@ -183,34 +183,65 @@ def fiyat_formatla(fiyat):
 # ─── BORSA FİYAT FONKSİYONLARI ───────────────────────────────────────────────
 
 def binance_tumfiyatlar():
-    try:
-        r = _session.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15)
-        sonuc = {}
-        for item in r.json():
-            if not isinstance(item, dict): continue
-            sym = item.get("symbol", "")
-            if sym.endswith("USDT"):
-                coin = sym[:-4]
-                if coin in BINANCE_HARIC: continue
-                try:
-                    fiyat = float(item["lastPrice"])
-                    hacim = float(item["quoteVolume"])
-                    ask   = float(item.get("askPrice", 0) or 0)
-                    bid   = float(item.get("bidPrice", 0) or 0)
-                    if fiyat > 0:
-                        sonuc[coin] = {
-                            "fiyat": fiyat,
-                            "hacim": hacim,
-                            "ask":   ask if ask > 0 else fiyat,
-                            "bid":   bid if bid > 0 else fiyat,
-                        }
-                except: pass
-        borsa_hata_kontrol("Binance", True)
-        return sonuc
-    except Exception as e:
-        print(f"Binance hata: {e}")
-        borsa_hata_kontrol("Binance", False)
-        return {}
+    # Binance birden çok endpoint'i var, Türkiye/bazı IP'lerden erişim için fallback
+    endpoints = [
+        "https://api.binance.com/api/v3/ticker/24hr",
+        "https://api1.binance.com/api/v3/ticker/24hr",
+        "https://api2.binance.com/api/v3/ticker/24hr",
+        "https://api3.binance.com/api/v3/ticker/24hr",
+        "https://api4.binance.com/api/v3/ticker/24hr",
+        "https://api-gcp.binance.com/api/v3/ticker/24hr",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
+    son_hata = None
+
+    for url in endpoints:
+        try:
+            r = _session.get(url, headers=headers, timeout=15)
+            if r.status_code != 200:
+                son_hata = f"{url.split('//')[1].split('/')[0]} HTTP {r.status_code} body:{r.text[:120]}"
+                continue
+            try:
+                data = r.json()
+            except Exception:
+                son_hata = f"{url.split('//')[1].split('/')[0]} JSON değil body:{r.text[:120]}"
+                continue
+
+            sonuc = {}
+            for item in data:
+                if not isinstance(item, dict): continue
+                sym = item.get("symbol", "")
+                if sym.endswith("USDT"):
+                    coin = sym[:-4]
+                    if coin in BINANCE_HARIC: continue
+                    try:
+                        fiyat = float(item["lastPrice"])
+                        hacim = float(item["quoteVolume"])
+                        ask   = float(item.get("askPrice", 0) or 0)
+                        bid   = float(item.get("bidPrice", 0) or 0)
+                        if fiyat > 0:
+                            sonuc[coin] = {
+                                "fiyat": fiyat,
+                                "hacim": hacim,
+                                "ask":   ask if ask > 0 else fiyat,
+                                "bid":   bid if bid > 0 else fiyat,
+                            }
+                    except: pass
+            if sonuc:
+                borsa_hata_kontrol("Binance", True)
+                return sonuc
+        except Exception as e:
+            son_hata = f"{url.split('//')[1].split('/')[0]} exception: {e}"
+            continue
+
+    print(f"Binance hata: {son_hata}")
+    borsa_hata_kontrol("Binance", False)
+    return {}
 
 
 def gate_tumfiyatlar():
@@ -493,38 +524,66 @@ def paribu_tumfiyatlar():
 
 
 def bybit_tumfiyatlar():
-    try:
-        # Bybit V5 API - tüm spot tickers tek çağrıda
-        r = _session.get("https://api.bybit.com/v5/market/tickers",
-                        params={"category": "spot"}, timeout=10)
-        data = r.json()
-        if data.get("retCode") != 0:
-            raise Exception(f"retCode={data.get('retCode')}: {data.get('retMsg')}")
-        sonuc = {}
-        for item in data.get("result", {}).get("list", []):
-            sym = item.get("symbol", "")
-            if sym.endswith("USDT"):
-                coin = sym[:-4]
-                if coin in BYBIT_HARIC: continue
-                try:
-                    fiyat = float(item.get("lastPrice", 0) or 0)
-                    hacim = float(item.get("turnover24h", 0) or 0)  # USDT cinsinden 24h hacim
-                    ask   = float(item.get("ask1Price", 0) or 0)
-                    bid   = float(item.get("bid1Price", 0) or 0)
-                    if fiyat > 0:
-                        sonuc[coin] = {
-                            "fiyat": fiyat,
-                            "hacim": hacim,
-                            "ask":   ask if ask > 0 else fiyat,
-                            "bid":   bid if bid > 0 else fiyat,
-                        }
-                except: pass
-        borsa_hata_kontrol("Bybit", True)
-        return sonuc
-    except Exception as e:
-        print(f"Bybit hata: {e}")
-        borsa_hata_kontrol("Bybit", False)
-        return {}
+    # Bybit V5 API - tüm spot tickers tek çağrıda
+    # Bazı bölgelerde api.bybit.com bloklanıyor, api.bytick.com fallback
+    endpoints = [
+        "https://api.bybit.com/v5/market/tickers",
+        "https://api.bytick.com/v5/market/tickers",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
+    son_hata = None
+
+    for url in endpoints:
+        try:
+            r = _session.get(url, params={"category": "spot"}, headers=headers, timeout=10)
+            # HTTP status kontrolü
+            if r.status_code != 200:
+                son_hata = f"{url} HTTP {r.status_code} body:{r.text[:150]}"
+                continue
+            # JSON parse dene
+            try:
+                data = r.json()
+            except Exception:
+                son_hata = f"{url} JSON değil, body:{r.text[:150]}"
+                continue
+            if data.get("retCode") != 0:
+                son_hata = f"{url} retCode={data.get('retCode')} msg={data.get('retMsg')}"
+                continue
+
+            sonuc = {}
+            for item in data.get("result", {}).get("list", []):
+                sym = item.get("symbol", "")
+                if sym.endswith("USDT"):
+                    coin = sym[:-4]
+                    if coin in BYBIT_HARIC: continue
+                    try:
+                        fiyat = float(item.get("lastPrice", 0) or 0)
+                        hacim = float(item.get("turnover24h", 0) or 0)
+                        ask   = float(item.get("ask1Price", 0) or 0)
+                        bid   = float(item.get("bid1Price", 0) or 0)
+                        if fiyat > 0:
+                            sonuc[coin] = {
+                                "fiyat": fiyat,
+                                "hacim": hacim,
+                                "ask":   ask if ask > 0 else fiyat,
+                                "bid":   bid if bid > 0 else fiyat,
+                            }
+                    except: pass
+            borsa_hata_kontrol("Bybit", True)
+            return sonuc
+        except Exception as e:
+            son_hata = f"{url} exception: {e}"
+            continue
+
+    # Tüm endpoint'ler başarısız
+    print(f"Bybit hata: {son_hata}")
+    borsa_hata_kontrol("Bybit", False)
+    return {}
 
 
 def btcturk_tumfiyatlar():
