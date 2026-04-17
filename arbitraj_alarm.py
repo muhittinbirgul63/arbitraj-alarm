@@ -12,9 +12,7 @@ Kripto Arbitraj Alarm Botu v5
 import requests
 import time
 import os
-import json
 import threading
-import websocket
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
@@ -72,11 +70,6 @@ binance_cache = {}
 gate_cache    = {}
 mexc_cache    = {}
 kucoin_cache  = {}
-
-# Paribu WebSocket cache
-paribu_ws_cache = {}
-paribu_ws_lock  = threading.Lock()
-paribu_ws_hazir = threading.Event()  # WebSocket bağlı ve veri geldi mi
 
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
@@ -327,91 +320,7 @@ def kucoin_tumfiyatlar():
         return {}
 
 
-def paribu_ws_baslat():
-    """Paribu WebSocket'e bağlan, ticker verilerini cache'e yaz"""
-    global paribu_ws_cache
-
-    def on_open(ws):
-        print("[PARIBU WS] Bağlandı, abone olunuyor...")
-        # Tüm coinler için ticker24h aboneliği
-        # Önce market listesini al
-        try:
-            r = requests.get("https://www.paribu.com/ticker", timeout=10)
-            markets = []
-            for parite in r.json():
-                if parite.endswith("_TL") or parite.endswith("_tl"):
-                    market = parite.lower().replace("_tl", "_tl")
-                    markets.append(f"ticker24h:{market}@1000ms")
-            # 100'er adet gönder (limit aşmamak için)
-            for i in range(0, len(markets), 50):
-                ws.send(json.dumps({
-                    "method": "subscribe",
-                    "channels": markets[i:i+50],
-                    "id": f"req_{i}"
-                }))
-            print(f"[PARIBU WS] {len(markets)} market için abone olundu")
-        except Exception as e:
-            print(f"[PARIBU WS] Abone hata: {e}")
-
-    def on_message(ws, message):
-        try:
-            veri = json.loads(message)
-            if veri.get("e") == "ticker24h":
-                market = veri.get("s", "")
-                r = veri.get("r", {})
-                if not market or not r:
-                    return
-                coin = market.upper().replace("_TL", "")
-                fiyat = float(r.get("c", 0) or 0)
-                if fiyat <= 0:
-                    return
-                # Paribu ticker24h'da ask/bid yok, lowestAsk/highestBid REST'te var
-                # Bu yüzden REST'ten gelen ask/bid değerlerini koruyoruz
-                with paribu_ws_lock:
-                    eski = paribu_ws_cache.get(coin, {})
-                    paribu_ws_cache[coin] = {
-                        "fiyat": fiyat,
-                        "ask":   eski.get("ask", fiyat),
-                        "bid":   eski.get("bid", fiyat),
-                        "hacim": float(r.get("q", 0) or 0),
-                    }
-                if not paribu_ws_hazir.is_set() and len(paribu_ws_cache) > 10:
-                    paribu_ws_hazir.set()
-                    print(f"[PARIBU WS] Hazır — {len(paribu_ws_cache)} coin")
-        except Exception as e:
-            pass
-
-    def on_error(ws, error):
-        print(f"[PARIBU WS] Hata: {error}")
-
-    def on_close(ws, code, msg):
-        print(f"[PARIBU WS] Bağlantı kapandı ({code}), yeniden bağlanıyor...")
-        paribu_ws_hazir.clear()
-        time.sleep(5)
-
-    while True:
-        try:
-            ws = websocket.WebSocketApp(
-                "wss://api.paribu.com/stream",
-                on_open=on_open,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close,
-            )
-            ws.run_forever(ping_interval=30, ping_timeout=10)
-        except Exception as e:
-            print(f"[PARIBU WS] Kritik hata: {e}")
-            time.sleep(10)
-
-
 def paribu_tumfiyatlar():
-    """WebSocket cache varsa onu kullan, yoksa REST'e düş"""
-    with paribu_ws_lock:
-        if paribu_ws_hazir.is_set() and len(paribu_ws_cache) > 10:
-            borsa_hata_kontrol("Paribu", True)
-            return dict(paribu_ws_cache)
-
-    # WS henüz hazır değil veya bağlı değil — REST fallback
     try:
         r = _session.get("https://www.paribu.com/ticker", timeout=10)
         sonuc = {}
@@ -424,15 +333,6 @@ def paribu_tumfiyatlar():
                     bid   = float(bilgi.get("highestBid", fiyat))
                     hacim = float(bilgi.get("volume", 0)) * fiyat
                     if fiyat > 0:
-                        # REST'ten ask/bid güncelle WS cache'e de yaz
-                        with paribu_ws_lock:
-                            ws_veri = paribu_ws_cache.get(coin, {})
-                            paribu_ws_cache[coin] = {
-                                "fiyat": ws_veri.get("fiyat", fiyat),
-                                "ask":   ask,
-                                "bid":   bid,
-                                "hacim": ws_veri.get("hacim", hacim),
-                            }
                         sonuc[coin] = {"fiyat": fiyat, "ask": ask, "bid": bid, "hacim": hacim}
                 except: pass
         borsa_hata_kontrol("Paribu", True)
@@ -788,11 +688,6 @@ def bot_calistir():
 
     komut_thread = threading.Thread(target=komut_dinleyici, daemon=True)
     komut_thread.start()
-
-    # Paribu WebSocket thread başlat
-    ws_thread = threading.Thread(target=paribu_ws_baslat, daemon=True)
-    ws_thread.start()
-    print("[WS] Paribu WebSocket bağlantısı kuruluyor...")
 
     telegram_gonder(os.getenv("CHAT_ID_06"),
         f"✅ <b>Arbitraj Alarm Botu v5 Başladı</b>\n"
