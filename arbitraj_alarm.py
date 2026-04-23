@@ -33,8 +33,9 @@ ADMIN_ID       = str(os.getenv("ADMIN_ID", "1072335473"))
 MEXC_HARIC    = {"FB"}
 GATE_HARIC    = {"FB"}
 # 1 Nisan 2026'da Binance'ten delisted: A2Z, FORTH, HOOK, IDEX, LRC, NTRN, RDNT, SXP
+# Nisan 2026'da Binance delist: OXT
 # GAL: farklı token
-BINANCE_HARIC = {"GAL", "A2Z", "FORTH", "HOOK", "IDEX", "LRC", "NTRN", "RDNT", "SXP"}
+BINANCE_HARIC = {"GAL", "A2Z", "FORTH", "HOOK", "IDEX", "LRC", "NTRN", "RDNT", "SXP", "OXT"}
 OKX_HARIC     = set()
 KUCOIN_HARIC  = {"FB"}
 BYBIT_HARIC   = set()
@@ -1103,12 +1104,16 @@ def arb_hacim_hesapla_tl_al(usdt_bid, asks_tl, kur):
     }
 
 
-def format_arb_hacim(arb):
-    """Arbitraj hacim sonucunu kısa string'e çevir: '$1,240 (480 SPK)' gibi."""
+def format_arb_hacim(arb, coin_sembol=""):
+    """Arbitraj hacim sonucunu iki satır olarak formatlar:
+      '₺890,000 ($19,786)\n🪙 Miktar   175,800 ITA'
+    coin_sembol boşsa miktar satırı 'Miktar' yazar."""
     if not arb or arb["coin_miktar"] <= 0:
         return None
     usdt = arb["usdt_toplam"]
+    tl   = arb.get("tl_toplam", 0)
     coin_m = arb["coin_miktar"]
+
     # Coin miktarı format
     if coin_m >= 10000:
         coin_str = f"{coin_m:,.0f}"
@@ -1116,12 +1121,22 @@ def format_arb_hacim(arb):
         coin_str = f"{coin_m:.1f}"
     else:
         coin_str = f"{coin_m:.3f}".rstrip("0").rstrip(".")
+
     # USDT format
     if usdt >= 1000:
         usdt_str = f"${usdt:,.0f}"
     else:
         usdt_str = f"${usdt:.1f}"
-    return f"{usdt_str} ({coin_str})"
+
+    # TL format — TL önce
+    if tl >= 1000:
+        tl_str = f"₺{tl:,.0f}"
+    else:
+        tl_str = f"₺{tl:.2f}"
+
+    # Sonuç: iki satır. "₺890,000 ($19,786)\n🪙 Miktar   175,800 ITA"
+    miktar_satir = f"🪙 Miktar   {coin_str} {coin_sembol}".rstrip()
+    return f"{tl_str} ({usdt_str})\n{miktar_satir}"
 
 
 def orderbook_ask(borsa, coin):
@@ -1239,17 +1254,45 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
                 zaman      = datetime.now(TZ_TR).strftime("%H:%M:%S")
                 grup_emoji = GRUP_EMOJI.get(esik, "📊")
                 hacim_str  = f"${hacim_usdt:,.0f}" if hacim_usdt >= MIN_HACIM_USDT else "⚠️ Yetersiz"
-                # Arb hacmi satırı — orderbook'tan hesaplanan kârlı bölge
-                arb_satir = f"\n💎 Arb: {arb_str}" if arb_str else ""
-                mesaj = (
-                    f"🚨 <b>{coin}</b> {grup_emoji} %{fark_yuzde:.2f}\n"
-                    f"🟢 <b>{al_borsa}</b> → {al_fiyat_str}\n"
-                    f"🔴 <b>{sat_borsa}</b> → {sat_fiyat_str}\n"
-                    f"📊 24h: {hacim_str} | ₺{kur:.2f} | {zaman}"
-                    f"{arb_satir}"
-                )
+
+                # al_fiyat_str ve sat_fiyat_str'i TL önce, dolar parantez formatına standartlaştır
+                def tl_once(s):
+                    s = s.strip()
+                    if s.startswith("₺") and "(≈$" in s:
+                        return s.replace("(≈$", "($")
+                    if s.startswith("$") and "(≈₺" in s:
+                        dolar_kismi, tl_kismi = s.split(" (≈", 1)
+                        tl_kismi = tl_kismi.rstrip(")")
+                        return f"{tl_kismi} ({dolar_kismi})"
+                    return s
+
+                al_tl  = tl_once(al_fiyat_str)
+                sat_tl = tl_once(sat_fiyat_str)
+
+                # Tasarım 1 — minimalist & hizalı
+                # arb_str iki satırlı gelir:
+                #   "₺890,000 ($19,786)
+                #    🪙 Miktar   175,800 ITA"
+                # İlk satırı "💎 Hacim    ..." ile birlikte kullanırız,
+                # ikinci satır kendisi zaten "🪙 Miktar ..." diye başlar.
+                satirlar = [
+                    f"🚨 <b>{coin}</b> — %{fark_yuzde:.2f} {grup_emoji}",
+                    "━━━━━━━━━━━━━━━",
+                    f"🟢 Al  │ <b>{al_borsa}</b>   {al_tl}",
+                    f"🔴 Sat │ <b>{sat_borsa}</b>   {sat_tl}",
+                    "━━━━━━━━━━━━━━━",
+                ]
+                if arb_str:
+                    # arb_str = "₺X (₹Y)\n🪙 Miktar   Z COIN"  → iki ayrı satır olarak yaz
+                    arb_satirlar = arb_str.split("\n")
+                    satirlar.append(f"💎 Hacim    {arb_satirlar[0]}")
+                    for ek in arb_satirlar[1:]:
+                        satirlar.append(ek)
+                satirlar.append(f"📊 24h      {hacim_str}")
+                satirlar.append(f"⏱️ {zaman} · ₺{kur:.2f}")
+                mesaj = "\n".join(satirlar)
                 print(f"[{zaman}] {grup_emoji} {coin} {al_borsa}→{sat_borsa} %{fark_yuzde:.2f}"
-                      + (f" | {arb_str}" if arb_str else ""))
+                      + (f" | {arb_str.split(chr(10))[0]}" if arb_str else ""))
                 telegram_gonder(chat_id, mesaj)
 
                 # Mesaj atıldıktan sonra sayaca ekle
@@ -1352,7 +1395,7 @@ def karsilastir_orderbook(aday):
             # Arbitraj hacmi: TL borsasının bid tarafında usdt_ask×kur'un
             # üstündeki emirleri topla
             arb = arb_hacim_hesapla_tl_sat(ask, tl_bids, kur) if tl_bids else None
-            arb_str = format_arb_hacim(arb)
+            arb_str = format_arb_hacim(arb, coin)
 
             bildirim_gonder(coin, borsa_usdt, borsa_tl,
                 f"${fiyat_formatla(ask)} (≈₺{fiyat_formatla(ask_tl)})",
@@ -1362,7 +1405,6 @@ def karsilastir_orderbook(aday):
     elif aday["yon"] == "tl_al":
         tl_ask      = aday["tl_ask"]
         tl_ask_usdt = aday["tl_ask_usdt"]
-        fark        = aday["fark"]
         bid = orderbook_bid(borsa_usdt, coin)
         if not bid or bid <= 0:
             print(f"[ORDERBOOK] {coin} {borsa_usdt} bid alınamadı, alarm atlandı")
@@ -1372,7 +1414,7 @@ def karsilastir_orderbook(aday):
             # Ters yön: TL borsasının ask tarafında usdt_bid×kur'un altındaki
             # emirleri topla (ucuza alınabilecek hacim)
             arb = arb_hacim_hesapla_tl_al(bid, tl_asks, kur) if tl_asks else None
-            arb_str = format_arb_hacim(arb)
+            arb_str = format_arb_hacim(arb, coin)
 
             bildirim_gonder(coin, borsa_tl, borsa_usdt,
                 f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
@@ -1428,7 +1470,7 @@ def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur_paribu, kur_btcturk):
                         "tl_toplam": toplam_tl,
                         "usdt_toplam": toplam_tl / kur_btcturk,
                     }
-            arb_str = format_arb_hacim(arb)
+            arb_str = format_arb_hacim(arb, coin)
 
             bildirim_gonder(coin, "Paribu", "BTCTürk",
                 f"₺{fiyat_formatla(p_ask)}", f"₺{fiyat_formatla(b_bid)}",
@@ -1436,8 +1478,6 @@ def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur_paribu, kur_btcturk):
 
     # BTCTürk'ten al → Paribu'da sat
     elif p_bid > b_ask:
-        fark = ((p_bid - b_ask) / p_ask) * 100 if p_ask > 0 else 0
-        # (üst satırda orijinal kod p_bid-b_ask/b_ask kullanıyordu, onu koruyalım)
         fark = ((p_bid - b_ask) / b_ask) * 100
         if 0 < fark <= 50:
             # Paribu bid tarafında b_ask'ın üstündeki emirler
@@ -1457,7 +1497,7 @@ def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur_paribu, kur_btcturk):
                         "tl_toplam": toplam_tl,
                         "usdt_toplam": toplam_tl / kur_paribu,
                     }
-            arb_str = format_arb_hacim(arb)
+            arb_str = format_arb_hacim(arb, coin)
 
             bildirim_gonder(coin, "BTCTürk", "Paribu",
                 f"₺{fiyat_formatla(b_ask)}", f"₺{fiyat_formatla(p_bid)}",
