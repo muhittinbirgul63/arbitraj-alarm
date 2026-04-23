@@ -742,19 +742,49 @@ def paribu_ws_on_message(ws, message):
                     # Sahte spread (ask=bid=last) VERMEK YANLIŞ ALARM ÜRETİR.
                     paribu_ws_cache[coin] = {
                         "fiyat": fiyat, "ask": None, "bid": None, "hacim": hacim_tl,
+                        "bids": [], "asks": [],
                     }
                 paribu_ws_son[coin] = time.time()
 
         elif event == "orderbook":
             # Gerçek best bid/ask — arbitraj için bu kritik
-            bids = r.get("b", [])
-            asks = r.get("a", [])
-            if not bids or not asks:
+            bids_raw = r.get("b", [])
+            asks_raw = r.get("a", [])
+            if not bids_raw or not asks_raw:
                 return
             try:
-                bid = float(bids[0][0])
-                ask = float(asks[0][0])
-            except (ValueError, IndexError):
+                # Tüm seviyeleri parse et (arbitraj hacim hesabı için)
+                # Format: [[fiyat_str, miktar_str], ...]
+                bids = []
+                for seviye in bids_raw:
+                    try:
+                        p = float(seviye[0])
+                        m = float(seviye[1])
+                        if p > 0 and m > 0:
+                            bids.append((p, m))
+                    except (ValueError, IndexError, TypeError):
+                        continue
+                asks = []
+                for seviye in asks_raw:
+                    try:
+                        p = float(seviye[0])
+                        m = float(seviye[1])
+                        if p > 0 and m > 0:
+                            asks.append((p, m))
+                    except (ValueError, IndexError, TypeError):
+                        continue
+
+                if not bids or not asks:
+                    return
+
+                # Bids: yüksekten düşüğe sırala (en yüksek alıcı başta)
+                bids.sort(key=lambda x: x[0], reverse=True)
+                # Asks: düşükten yükseğe sırala (en ucuz satıcı başta)
+                asks.sort(key=lambda x: x[0])
+
+                bid = bids[0][0]
+                ask = asks[0][0]
+            except Exception:
                 return
             if bid <= 0 or ask <= 0:
                 return
@@ -762,10 +792,13 @@ def paribu_ws_on_message(ws, message):
                 if coin in paribu_ws_cache:
                     paribu_ws_cache[coin]["ask"] = ask
                     paribu_ws_cache[coin]["bid"] = bid
+                    paribu_ws_cache[coin]["bids"] = bids  # tüm bid seviyeleri
+                    paribu_ws_cache[coin]["asks"] = asks  # tüm ask seviyeleri
                 else:
                     # Henüz ticker gelmemiş → fiyat None → karşılaştırmaya dahil edilmez.
                     paribu_ws_cache[coin] = {
                         "fiyat": None, "ask": ask, "bid": bid, "hacim": 0,
+                        "bids": bids, "asks": asks,
                     }
                 paribu_ws_son[coin] = time.time()
     except Exception:
@@ -929,6 +962,168 @@ def btcturk_tumfiyatlar():
 
 # ─── ORDERBOOK FONKSİYONLARI ─────────────────────────────────────────────────
 
+# BTCTürk orderbook cache — alarm anında fetch edilir, 20sn TTL.
+# Aynı coin için her turda tekrar istek atmamak için cache şart.
+_btcturk_ob_cache = {}      # {"BTC": (timestamp, bids_list, asks_list)}
+_btcturk_ob_lock = threading.Lock()
+BTCTURK_OB_TTL = 20.0       # saniye
+
+
+def btcturk_orderbook_al(coin):
+    """BTCTürk /orderbook endpoint'ten tam orderbook çek. Cache'li.
+    Returns: (bids, asks) — her biri [(fiyat, miktar), ...] TL cinsinden. None dönebilir.
+
+    NOT: Sadece alarm tetiklendiğinde çağrılır (her taramada değil). Yani
+    BTCTürk'e atılan ek istek sayısı = ilgili coin'in alarm sayısı. Genelde
+    saniyede 1-2 coin alarm verdiği için rate limit riski düşük.
+    """
+    simdi = time.time()
+    # Cache kontrolü
+    with _btcturk_ob_lock:
+        if coin in _btcturk_ob_cache:
+            ts, bids, asks = _btcturk_ob_cache[coin]
+            if simdi - ts < BTCTURK_OB_TTL:
+                return bids, asks
+
+    try:
+        r = _session.get("https://api.btcturk.com/api/v2/orderbook",
+                         params={"pairSymbol": f"{coin}_TRY", "limit": 25},
+                         timeout=5)
+        if r.status_code != 200:
+            return None, None
+        data = r.json().get("data", {})
+        bids_raw = data.get("bids", [])
+        asks_raw = data.get("asks", [])
+
+        bids = []
+        for seviye in bids_raw:
+            try:
+                # BTCTürk format: [fiyat_str, miktar_str]
+                p = float(seviye[0])
+                m = float(seviye[1])
+                if p > 0 and m > 0:
+                    bids.append((p, m))
+            except (ValueError, IndexError, TypeError):
+                continue
+        asks = []
+        for seviye in asks_raw:
+            try:
+                p = float(seviye[0])
+                m = float(seviye[1])
+                if p > 0 and m > 0:
+                    asks.append((p, m))
+            except (ValueError, IndexError, TypeError):
+                continue
+
+        if not bids or not asks:
+            return None, None
+
+        bids.sort(key=lambda x: x[0], reverse=True)
+        asks.sort(key=lambda x: x[0])
+
+        with _btcturk_ob_lock:
+            _btcturk_ob_cache[coin] = (simdi, bids, asks)
+        return bids, asks
+    except Exception as e:
+        print(f"[BTCTÜRK ORDERBOOK] {coin} hata: {e}")
+        return None, None
+
+
+def arb_hacim_hesapla_tl_sat(usdt_ask, bids_tl, kur):
+    """
+    TL borsasında BID tarafındaki kârlı emirleri topla.
+
+    Senaryosu: Yurtdışı borsasından USDT ile coin alacaksın (usdt_ask fiyatından),
+    TL borsasında satacaksın. TL borsasının bid tarafında, `usdt_ask × kur`'un
+    ÜSTÜNDEKİ tüm emirler kârlıdır — onları topla.
+
+    Args:
+        usdt_ask: Yurtdışı borsasında alış fiyatı (USDT)
+        bids_tl:  TL borsası bid listesi [(fiyat_tl, miktar), ...] — yüksekten düşüğe sıralı
+        kur:      TL borsasının USDT/TL kuru
+
+    Returns:
+        {"coin_miktar": float, "tl_toplam": float, "usdt_toplam": float}
+        Kârlı bölge yoksa miktar/toplam 0 döner.
+    """
+    if not bids_tl or not usdt_ask or usdt_ask <= 0 or not kur or kur <= 0:
+        return {"coin_miktar": 0, "tl_toplam": 0, "usdt_toplam": 0}
+
+    # Alış fiyatının TL karşılığı — bid bu değerin üstünde ise kârlı
+    esik_tl = usdt_ask * kur
+
+    toplam_coin = 0.0
+    toplam_tl = 0.0
+    for fiyat_tl, miktar in bids_tl:
+        if fiyat_tl <= esik_tl:
+            break  # bids yüksekten düşüğe sıralı, daha alta bakmaya gerek yok
+        toplam_coin += miktar
+        toplam_tl += fiyat_tl * miktar
+
+    return {
+        "coin_miktar": toplam_coin,
+        "tl_toplam": toplam_tl,
+        "usdt_toplam": toplam_tl / kur if kur > 0 else 0,
+    }
+
+
+def arb_hacim_hesapla_tl_al(usdt_bid, asks_tl, kur):
+    """
+    TL borsasında ASK tarafındaki kârlı emirleri topla (ters yön).
+
+    Senaryosu: TL borsasından coin alacaksın (TL ask fiyatından),
+    yurtdışı borsasında satacaksın (usdt_bid fiyatından). TL borsasının ask
+    tarafında, `usdt_bid × kur`'un ALTINDAKİ tüm emirler kârlıdır — onları topla.
+
+    Args:
+        usdt_bid: Yurtdışı borsasında satış fiyatı (USDT)
+        asks_tl:  TL borsası ask listesi [(fiyat_tl, miktar), ...] — düşükten yükseğe sıralı
+        kur:      TL borsasının USDT/TL kuru
+
+    Returns:
+        {"coin_miktar": float, "tl_toplam": float, "usdt_toplam": float}
+    """
+    if not asks_tl or not usdt_bid or usdt_bid <= 0 or not kur or kur <= 0:
+        return {"coin_miktar": 0, "tl_toplam": 0, "usdt_toplam": 0}
+
+    esik_tl = usdt_bid * kur
+
+    toplam_coin = 0.0
+    toplam_tl = 0.0
+    for fiyat_tl, miktar in asks_tl:
+        if fiyat_tl >= esik_tl:
+            break  # asks düşükten yükseğe sıralı, daha üste bakmaya gerek yok
+        toplam_coin += miktar
+        toplam_tl += fiyat_tl * miktar
+
+    return {
+        "coin_miktar": toplam_coin,
+        "tl_toplam": toplam_tl,
+        "usdt_toplam": toplam_tl / kur if kur > 0 else 0,
+    }
+
+
+def format_arb_hacim(arb):
+    """Arbitraj hacim sonucunu kısa string'e çevir: '$1,240 (480 SPK)' gibi."""
+    if not arb or arb["coin_miktar"] <= 0:
+        return None
+    usdt = arb["usdt_toplam"]
+    coin_m = arb["coin_miktar"]
+    # Coin miktarı format
+    if coin_m >= 10000:
+        coin_str = f"{coin_m:,.0f}"
+    elif coin_m >= 100:
+        coin_str = f"{coin_m:.1f}"
+    else:
+        coin_str = f"{coin_m:.3f}".rstrip("0").rstrip(".")
+    # USDT format
+    if usdt >= 1000:
+        usdt_str = f"${usdt:,.0f}"
+    else:
+        usdt_str = f"${usdt:.1f}"
+    return f"{usdt_str} ({coin_str})"
+
+
 def orderbook_ask(borsa, coin):
     """Cache'ten ask fiyatını oku. Cache'te yoksa None dön.
 
@@ -1015,7 +1210,7 @@ def usdt_tl_kuru(paribu, btcturk):
     return sum(kurlar.values()) / len(kurlar)
 
 
-def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark_yuzde, hacim_usdt, kur):
+def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark_yuzde, hacim_usdt, kur, arb_str=None):
     for esik, chat_id in get_gruplar():
         if fark_yuzde >= esik:
             anahtar = f"{coin}_{esik}"
@@ -1044,13 +1239,17 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
                 zaman      = datetime.now(TZ_TR).strftime("%H:%M:%S")
                 grup_emoji = GRUP_EMOJI.get(esik, "📊")
                 hacim_str  = f"${hacim_usdt:,.0f}" if hacim_usdt >= MIN_HACIM_USDT else "⚠️ Yetersiz"
+                # Arb hacmi satırı — orderbook'tan hesaplanan kârlı bölge
+                arb_satir = f"\n💎 Arb: {arb_str}" if arb_str else ""
                 mesaj = (
                     f"🚨 <b>{coin}</b> {grup_emoji} %{fark_yuzde:.2f}\n"
                     f"🟢 <b>{al_borsa}</b> → {al_fiyat_str}\n"
                     f"🔴 <b>{sat_borsa}</b> → {sat_fiyat_str}\n"
-                    f"📊 {hacim_str} | ₺{kur:.2f} | {zaman}"
+                    f"📊 24h: {hacim_str} | ₺{kur:.2f} | {zaman}"
+                    f"{arb_satir}"
                 )
-                print(f"[{zaman}] {grup_emoji} {coin} {al_borsa}→{sat_borsa} %{fark_yuzde:.2f}")
+                print(f"[{zaman}] {grup_emoji} {coin} {al_borsa}→{sat_borsa} %{fark_yuzde:.2f}"
+                      + (f" | {arb_str}" if arb_str else ""))
                 telegram_gonder(chat_id, mesaj)
 
                 # Mesaj atıldıktan sonra sayaca ekle
@@ -1089,6 +1288,11 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
     min_hacim  = min(usdt_hacim, tl_hacim)
     usdt_tl    = usdt_fiyat * kur
 
+    # TL orderbook seviyeleri — Paribu WS'ten gelir, BTCTürk için None
+    # (karsilastir_orderbook anında HTTP ile fetch edilir)
+    tl_bids = tl_veri.get("bids")  # [(fiyat, miktar), ...] yüksekten düşüğe
+    tl_asks = tl_veri.get("asks")  # [(fiyat, miktar), ...] düşükten yükseğe
+
     sonuclar = []
 
     # Yabancıdan al → TL'de sat
@@ -1101,6 +1305,7 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
                 "usdt_fiyat": usdt_fiyat, "tl_bid": tl_bid,
                 "usdt_tl": usdt_tl, "fark": fark,
                 "min_hacim": min_hacim, "kur": kur,
+                "tl_bids": tl_bids, "tl_asks": tl_asks,
             })
 
     # TL'den al → Yabancıda sat
@@ -1114,18 +1319,26 @@ def karsilastir(coin, usdt_veri, tl_veri, borsa_usdt, borsa_tl, kur):
                 "usdt_fiyat": usdt_fiyat, "tl_ask": tl_ask,
                 "tl_ask_usdt": tl_ask_usdt, "fark": fark,
                 "min_hacim": min_hacim, "kur": kur,
+                "tl_bids": tl_bids, "tl_asks": tl_asks,
             })
 
     return sonuclar if sonuclar else None
 
 
 def karsilastir_orderbook(aday):
-    """Tek bir aday için orderbook çekip gerçek farkı hesaplar ve alarm gönderir."""
+    """Tek bir aday için orderbook çekip gerçek farkı hesaplar ve alarm gönderir.
+    Ayrıca TL borsasındaki orderbook derinliğinden arbitraj hacmini hesaplar."""
     kur       = aday["kur"]
     coin      = aday["coin"]
     borsa_usdt = aday["borsa_usdt"]
     borsa_tl   = aday["borsa_tl"]
     min_hacim  = aday["min_hacim"]
+
+    # TL orderbook — Paribu'dan geldiyse cache'te var; BTCTürk ise anında fetch
+    tl_bids = aday.get("tl_bids")
+    tl_asks = aday.get("tl_asks")
+    if borsa_tl == "BTCTürk" and (tl_bids is None or tl_asks is None):
+        tl_bids, tl_asks = btcturk_orderbook_al(coin)
 
     if aday["yon"] == "usdt_al":
         tl_bid  = aday["tl_bid"]
@@ -1136,10 +1349,15 @@ def karsilastir_orderbook(aday):
         ask_tl      = ask * kur
         gercek_fark = ((tl_bid - ask_tl) / ask_tl) * 100
         if gercek_fark > 0:
+            # Arbitraj hacmi: TL borsasının bid tarafında usdt_ask×kur'un
+            # üstündeki emirleri topla
+            arb = arb_hacim_hesapla_tl_sat(ask, tl_bids, kur) if tl_bids else None
+            arb_str = format_arb_hacim(arb)
+
             bildirim_gonder(coin, borsa_usdt, borsa_tl,
                 f"${fiyat_formatla(ask)} (≈₺{fiyat_formatla(ask_tl)})",
                 f"₺{fiyat_formatla(tl_bid)} (≈${fiyat_formatla(tl_bid/kur)})",
-                gercek_fark, min_hacim, kur)
+                gercek_fark, min_hacim, kur, arb_str=arb_str)
 
     elif aday["yon"] == "tl_al":
         tl_ask      = aday["tl_ask"]
@@ -1151,10 +1369,15 @@ def karsilastir_orderbook(aday):
             return
         gercek_fark = ((bid - tl_ask_usdt) / tl_ask_usdt) * 100
         if gercek_fark > 0:
+            # Ters yön: TL borsasının ask tarafında usdt_bid×kur'un altındaki
+            # emirleri topla (ucuza alınabilecek hacim)
+            arb = arb_hacim_hesapla_tl_al(bid, tl_asks, kur) if tl_asks else None
+            arb_str = format_arb_hacim(arb)
+
             bildirim_gonder(coin, borsa_tl, borsa_usdt,
                 f"₺{fiyat_formatla(tl_ask)} (≈${fiyat_formatla(tl_ask_usdt)})",
                 f"${fiyat_formatla(bid)} (≈₺{fiyat_formatla(bid*kur)})",
-                gercek_fark, min_hacim, kur)
+                gercek_fark, min_hacim, kur, arb_str=arb_str)
 
 
 def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur_paribu, kur_btcturk):
@@ -1179,23 +1402,66 @@ def karsilastir_tl(coin, paribu_veri, btcturk_veri, kur_paribu, kur_btcturk):
     if p_ask <= 0 or b_ask <= 0:
         return
 
-    # Kur'u "karşılaştırmanın yapıldığı sat_borsa" kuruyla gönderiyoruz —
-    # kullanıcı sat_borsa'sında TL'yi USDT'ye çevirecek
+    # TL-TL arbitraj için ortak kur (her iki borsa TL) — fark hesabında
+    # doğrudan TL fiyatlar kullanılıyor zaten, kur sadece hacim USDT dönüşümü için.
     # Paribu'dan al → BTCTürk'te sat
     if b_bid > p_ask:
         fark = ((b_bid - p_ask) / p_ask) * 100
         if 0 < fark <= 50:
+            # Arb hacmi: BTCTürk bid tarafında p_ask'ın üstündeki emirler
+            # (BTCTürk'ün kendi TL fiyatına göre)
+            btcturk_bids, _ = btcturk_orderbook_al(coin)
+            arb = None
+            if btcturk_bids:
+                # BTCTürk'te satacağız, p_ask ise TL cinsinden alış fiyatı
+                # Dolaysız TL karşılaştırma: BTCTürk bid > p_ask olan tüm seviyeler
+                toplam_c = 0.0
+                toplam_tl = 0.0
+                for fiyat, miktar in btcturk_bids:
+                    if fiyat <= p_ask:
+                        break
+                    toplam_c += miktar
+                    toplam_tl += fiyat * miktar
+                if toplam_c > 0:
+                    arb = {
+                        "coin_miktar": toplam_c,
+                        "tl_toplam": toplam_tl,
+                        "usdt_toplam": toplam_tl / kur_btcturk,
+                    }
+            arb_str = format_arb_hacim(arb)
+
             bildirim_gonder(coin, "Paribu", "BTCTürk",
                 f"₺{fiyat_formatla(p_ask)}", f"₺{fiyat_formatla(b_bid)}",
-                fark, min_hacim, kur_btcturk)
+                fark, min_hacim, kur_btcturk, arb_str=arb_str)
 
     # BTCTürk'ten al → Paribu'da sat
     elif p_bid > b_ask:
+        fark = ((p_bid - b_ask) / p_ask) * 100 if p_ask > 0 else 0
+        # (üst satırda orijinal kod p_bid-b_ask/b_ask kullanıyordu, onu koruyalım)
         fark = ((p_bid - b_ask) / b_ask) * 100
         if 0 < fark <= 50:
+            # Paribu bid tarafında b_ask'ın üstündeki emirler
+            paribu_bids = paribu_veri.get("bids", [])
+            arb = None
+            if paribu_bids:
+                toplam_c = 0.0
+                toplam_tl = 0.0
+                for fiyat, miktar in paribu_bids:
+                    if fiyat <= b_ask:
+                        break
+                    toplam_c += miktar
+                    toplam_tl += fiyat * miktar
+                if toplam_c > 0:
+                    arb = {
+                        "coin_miktar": toplam_c,
+                        "tl_toplam": toplam_tl,
+                        "usdt_toplam": toplam_tl / kur_paribu,
+                    }
+            arb_str = format_arb_hacim(arb)
+
             bildirim_gonder(coin, "BTCTürk", "Paribu",
                 f"₺{fiyat_formatla(b_ask)}", f"₺{fiyat_formatla(p_bid)}",
-                fark, min_hacim, kur_paribu)
+                fark, min_hacim, kur_paribu, arb_str=arb_str)
 
 
 # ─── DURUM KONTROLÜ ──────────────────────────────────────────────────────────
