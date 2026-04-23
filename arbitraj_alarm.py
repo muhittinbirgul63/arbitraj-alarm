@@ -987,14 +987,31 @@ def btcturk_orderbook_al(coin):
                 return bids, asks
 
     try:
-        r = _session.get("https://api.btcturk.com/api/v2/orderbook",
-                         params={"pairSymbol": f"{coin}_TRY", "limit": 25},
-                         timeout=5)
-        if r.status_code != 200:
+        # BTCTürk API: pairSymbol formatı 'SPKTRY' (underscore YOK, dokümana göre).
+        # Bazı eski coinler için 'SPK_TRY' de çalışıyordu — iki formatı da dene.
+        sonuc_data = None
+        for pair_format in (f"{coin}TRY", f"{coin}_TRY"):
+            try:
+                r = _session.get("https://api.btcturk.com/api/v2/orderbook",
+                                 params={"pairSymbol": pair_format, "limit": 25},
+                                 timeout=5)
+                if r.status_code == 200:
+                    jdata = r.json()
+                    # success=false olabilir (pair bulunamadı) — o zaman diğer formatı dene
+                    if jdata.get("success") is False:
+                        continue
+                    d = jdata.get("data", {})
+                    if d and (d.get("bids") or d.get("asks")):
+                        sonuc_data = d
+                        break
+            except Exception:
+                continue
+
+        if not sonuc_data:
             return None, None
-        data = r.json().get("data", {})
-        bids_raw = data.get("bids", [])
-        asks_raw = data.get("asks", [])
+
+        bids_raw = sonuc_data.get("bids", [])
+        asks_raw = sonuc_data.get("asks", [])
 
         bids = []
         for seviye in bids_raw:
@@ -1278,20 +1295,23 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
                     f"🟢 <b>{al_borsa}</b> → {al_tl}",
                     f"🔴 <b>{sat_borsa}</b> → {sat_tl}",
                 ]
+                # A seçeneği: arb_str yoksa "hesaplanamadı" göster (debug için)
+                satirlar.append("━━━━━━━━━━━━━━━━━━━")
                 if arb_str:
                     # arb_str'i parçala: "₺X ($Y)\n🪙 Miktar   N COIN"
                     arb_satirlar = arb_str.split("\n")
-                    satirlar.append("━━━━━━━━━━━━━━━━━━━")
                     satirlar.append(f"💎 Arbitraj Hacmi: {arb_satirlar[0]}")
                     # "🪙 Miktar   N COIN" satırında iki nokta ekle → "🪙 Miktar:  N COIN"
                     for ek in arb_satirlar[1:]:
                         ek_duzenli = ek.replace("🪙 Miktar   ", "🪙 Miktar:  ")
                         satirlar.append(ek_duzenli)
-                    satirlar.append("━━━━━━━━━━━━━━━━━━━")
+                else:
+                    satirlar.append("💎 Arbitraj Hacmi: hesaplanamadı")
+                satirlar.append("━━━━━━━━━━━━━━━━━━━")
                 satirlar.append(f"📊 24h: {hacim_str} | ₺{kur:.2f} | {zaman}")
                 mesaj = "\n".join(satirlar)
                 print(f"[{zaman}] {grup_emoji} {coin} {al_borsa}→{sat_borsa} %{fark_yuzde:.2f}"
-                      + (f" | {arb_str.split(chr(10))[0]}" if arb_str else ""))
+                      + (f" | {arb_str.split(chr(10))[0]}" if arb_str else " | arb:?"))
                 telegram_gonder(chat_id, mesaj)
 
                 # Mesaj atıldıktan sonra sayaca ekle
