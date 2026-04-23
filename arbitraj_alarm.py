@@ -107,13 +107,17 @@ bybit_cache   = {}
 # Graceful shutdown — SIGTERM/SIGINT alındığında set edilir, ana döngü çıkar
 _shutdown = threading.Event()
 
-# Orderbook adayları için sabit worker havuzu (her tur 1000+ thread yaratmamak için)
-ORDERBOOK_POOL = ThreadPoolExecutor(max_workers=50, thread_name_prefix="ob")
+# Orderbook adayları için sabit worker havuzu.
+# 50 worker → 10 worker: Binance'e aynı anda 50 paralel istek atmak rate limit
+# aşıyordu. 10 worker yeterli; adaylar sıralı işlenir ama rate limit'i aşmaz.
+ORDERBOOK_POOL = ThreadPoolExecutor(max_workers=10, thread_name_prefix="ob")
 # Telegram mesajları için ayrı havuz — orderbook worker'ları Telegram'ı beklemesin
 TELEGRAM_POOL  = ThreadPoolExecutor(max_workers=5,  thread_name_prefix="tg")
 
-# TTL cache — tur 0.04sn'de bitiyor, borsaları 5sn'de bir taze çekmek rate limit için yeterli
-CACHE_TTL = 5.0
+# TTL cache — 5sn → 15sn: Binance /ticker/24hr weight=80. Dakikada 12 çağrı
+# (5sn TTL) 960 weight yapıyor; orderbook isteklerle toplam 1200'ü aşıp BAN
+# yiyorduk. 15sn TTL ile dakikada 4 çağrı = 320 weight → rahat alan.
+CACHE_TTL = 15.0
 
 
 def ttl_cache(ttl=CACHE_TTL):
@@ -306,6 +310,46 @@ def komut_dinleyici():
                     else:
                         telegram_gonder(chat_id, "✅ Banlı coin yok.")
 
+                elif metin == "/stat":
+                    # Bot sağlık durumu — Binance cooldown, borsa hata sayaçları vs.
+                    zaman = datetime.now(TZ_TR).strftime("%H:%M:%S")
+                    satirlar = [f"📊 <b>Bot Durumu</b> [{zaman}]"]
+
+                    # Binance rate limit durumu
+                    if binance_rate_limit_aktif():
+                        kalan = int(_binance_ban_kadar - time.time())
+                        satirlar.append(f"🔴 Binance COOLDOWN: {kalan//60}dk {kalan%60}sn")
+                    else:
+                        satirlar.append(f"🟢 Binance: normal")
+
+                    # MEXC cooldown
+                    if time.time() < _mexc_devre_disi_kadar:
+                        kalan = int(_mexc_devre_disi_kadar - time.time())
+                        satirlar.append(f"🔴 MEXC COOLDOWN: {kalan//60}dk {kalan%60}sn")
+                    else:
+                        satirlar.append(f"🟢 MEXC: normal")
+
+                    # Borsa hata sayaçları
+                    if hata_sayac:
+                        hatali = [(k, v) for k, v in hata_sayac.items() if v > 0]
+                        if hatali:
+                            hata_str = ", ".join(f"{b}:{v}" for b, v in hatali)
+                            satirlar.append(f"⚠️ Hata sayaçları: {hata_str}")
+
+                    # Aktif ban'ler
+                    aktif_ban = len([k for k, v in coin_ban.items() if v > time.time()])
+                    satirlar.append(f"🚫 Aktif otomatik ban: {aktif_ban} coin")
+                    satirlar.append(f"🚫 Manuel ban: {len(MANUEL_BAN)} coin")
+
+                    # Paribu WS durumu
+                    if paribu_ws_bagli:
+                        with paribu_ws_lock:
+                            satirlar.append(f"🟢 Paribu WS: {len(paribu_ws_cache)} coin")
+                    else:
+                        satirlar.append(f"🔴 Paribu WS: BAĞLANTI YOK")
+
+                    telegram_gonder(chat_id, "\n".join(satirlar))
+
         except Exception as e:
             print(f"[KOMUT HATA] {e}")
             time.sleep(5)
@@ -334,9 +378,36 @@ def fiyat_formatla(fiyat):
 
 # ─── BORSA FİYAT FONKSİYONLARI ───────────────────────────────────────────────
 
+# Binance rate limit cooldown — 418 (IP ban) veya 429 (rate limit) alınca
+# bir süre tüm Binance isteklerini durdur. Aksi takdirde retry'larla ban
+# süremiz uzar. 5 dakika güvenli default; Binance ban süreleri 2dk-3gün arası.
+_binance_ban_kadar = 0
+BINANCE_COOLDOWN = 300  # 5 dakika
+
+
+def binance_rate_limit_aktif():
+    """Binance'te aktif rate limit/ban cooldown var mı?"""
+    return time.time() < _binance_ban_kadar
+
+
+def _binance_ban_ayarla(sebep):
+    """Binance'i belli bir süre devre dışı bırak."""
+    global _binance_ban_kadar
+    _binance_ban_kadar = time.time() + BINANCE_COOLDOWN
+    kalan = BINANCE_COOLDOWN
+    print(f"[BINANCE COOLDOWN] {sebep} → {kalan//60}dk tüm istekler durduruldu")
+
+
 @ttl_cache()
 def binance_tumfiyatlar():
-    """Binance /ticker/24hr — 40 weight/çağrı. Cache ile dakikada ~12 çağrı = 480 weight."""
+    """Binance /ticker/24hr — weight=80. 15sn TTL ile dakikada 4 çağrı = 320 weight.
+    Orderbook'larla birlikte 1200 weight/dakika limiti içinde kalırız."""
+    # Ban cooldown aktifse → boş dön, ttl_cache önceki başarılı cache'i kullanır
+    if binance_rate_limit_aktif():
+        kalan = int(_binance_ban_kadar - time.time())
+        print(f"[BINANCE] Cooldown aktif, {kalan}sn daha isteği atla")
+        return {}
+
     # Türkiye/bazı IP'lerden erişim için çoklu endpoint fallback
     endpoints = [
         "https://api.binance.com/api/v3/ticker/24hr",
@@ -357,6 +428,11 @@ def binance_tumfiyatlar():
     for url in endpoints:
         try:
             r = _session.get(url, headers=headers, timeout=15)
+            # 418 (IP ban) veya 429 (rate limit) → TÜM endpoint'lere dokunma
+            if r.status_code in (418, 429):
+                _binance_ban_ayarla(f"HTTP {r.status_code} from {url.split('//')[1].split('/')[0]}")
+                borsa_hata_kontrol("Binance", False)
+                return {}
             if r.status_code != 200:
                 son_hata = f"{url.split('//')[1].split('/')[0]} HTTP {r.status_code} body:{r.text[:120]}"
                 continue
@@ -854,99 +930,51 @@ def btcturk_tumfiyatlar():
 # ─── ORDERBOOK FONKSİYONLARI ─────────────────────────────────────────────────
 
 def orderbook_ask(borsa, coin):
-    try:
-        if borsa == "Binance":
-            veri = binance_cache.get(coin)
-            if veri and veri.get("ask", 0) > 0:
-                return veri["ask"]
-            # Fallback: direkt istek
-            r = _session.get("https://api.binance.com/api/v3/ticker/bookTicker",
-                           params={"symbol": f"{coin}USDT"}, timeout=5)
-            if r.status_code == 200:
-                return float(r.json()["askPrice"])
-        elif borsa == "Gate":
-            veri = gate_cache.get(coin)
-            if veri and veri.get("ask", 0) > 0:
-                return veri["ask"]
-            r = _session.get("https://api.gateio.ws/api/v4/spot/order_book",
-                           params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
-            return float(r.json()["asks"][0][0])
-        elif borsa == "MEXC":
-            veri = mexc_cache.get(coin)
-            if veri and veri.get("ask", 0) > 0:
-                return veri["ask"]
-            r = _session.get("https://api.mexc.com/api/v3/ticker/bookTicker",
-                           params={"symbol": f"{coin}USDT"}, timeout=5)
-            return float(r.json()["askPrice"])
-        elif borsa == "OKX":
-            veri = okx_cache.get(coin)
-            if veri and veri.get("ask", 0) > 0:
-                return veri["ask"]
-            return None
-        elif borsa == "KuCoin":
-            veri = kucoin_cache.get(coin)
-            if veri and veri.get("ask", 0) > 0:
-                return veri["ask"]
-            r = _session.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
-                           params={"symbol": f"{coin}-USDT"}, timeout=5)
-            return float(r.json()["data"]["bestAsk"])
-        elif borsa == "Bybit":
-            veri = bybit_cache.get(coin)
-            if veri and veri.get("ask", 0) > 0:
-                return veri["ask"]
-            r = _session.get("https://api.bybit.com/v5/market/orderbook",
-                           params={"category": "spot", "symbol": f"{coin}USDT", "limit": 1}, timeout=5)
-            return float(r.json()["result"]["a"][0][0])
-    except Exception as e:
-        print(f"[ORDERBOOK ASK] {borsa} {coin} hata: {e}")
+    """Cache'ten ask fiyatını oku. Cache'te yoksa None dön.
+
+    RATE LIMIT KORUMASI: Eskiden cache'te yoksa direkt HTTP isteği atıyorduk.
+    100+ aday olduğunda dakikada 200+ ekstra istek → Binance IP banı. Artık
+    sadece `_tumfiyatlar` fonksiyonlarının doldurduğu cache'i okuyoruz;
+    cache yoksa o turda o aday skip edilir (bir sonraki turda cache dolu olur).
+    Binance cooldown aktifse zaten boş cache var → None döner → aday skip.
+    """
+    veri = None
+    if borsa == "Binance":
+        veri = binance_cache.get(coin)
+    elif borsa == "Gate":
+        veri = gate_cache.get(coin)
+    elif borsa == "MEXC":
+        veri = mexc_cache.get(coin)
+    elif borsa == "OKX":
+        veri = okx_cache.get(coin)
+    elif borsa == "KuCoin":
+        veri = kucoin_cache.get(coin)
+    elif borsa == "Bybit":
+        veri = bybit_cache.get(coin)
+
+    if veri and veri.get("ask", 0) > 0:
+        return veri["ask"]
     return None
 
 
 def orderbook_bid(borsa, coin):
-    try:
-        if borsa == "Binance":
-            veri = binance_cache.get(coin)
-            if veri and veri.get("bid", 0) > 0:
-                return veri["bid"]
-            r = _session.get("https://api.binance.com/api/v3/ticker/bookTicker",
-                           params={"symbol": f"{coin}USDT"}, timeout=5)
-            if r.status_code == 200:
-                return float(r.json()["bidPrice"])
-        elif borsa == "Gate":
-            veri = gate_cache.get(coin)
-            if veri and veri.get("bid", 0) > 0:
-                return veri["bid"]
-            r = _session.get("https://api.gateio.ws/api/v4/spot/order_book",
-                           params={"currency_pair": f"{coin}_USDT", "limit": 1}, timeout=5)
-            return float(r.json()["bids"][0][0])
-        elif borsa == "MEXC":
-            veri = mexc_cache.get(coin)
-            if veri and veri.get("bid", 0) > 0:
-                return veri["bid"]
-            r = _session.get("https://api.mexc.com/api/v3/ticker/bookTicker",
-                           params={"symbol": f"{coin}USDT"}, timeout=5)
-            return float(r.json()["bidPrice"])
-        elif borsa == "OKX":
-            veri = okx_cache.get(coin)
-            if veri and veri.get("bid", 0) > 0:
-                return veri["bid"]
-            return None
-        elif borsa == "KuCoin":
-            veri = kucoin_cache.get(coin)
-            if veri and veri.get("bid", 0) > 0:
-                return veri["bid"]
-            r = _session.get("https://api.kucoin.com/api/v1/market/orderbook/level1",
-                           params={"symbol": f"{coin}-USDT"}, timeout=5)
-            return float(r.json()["data"]["bestBid"])
-        elif borsa == "Bybit":
-            veri = bybit_cache.get(coin)
-            if veri and veri.get("bid", 0) > 0:
-                return veri["bid"]
-            r = _session.get("https://api.bybit.com/v5/market/orderbook",
-                           params={"category": "spot", "symbol": f"{coin}USDT", "limit": 1}, timeout=5)
-            return float(r.json()["result"]["b"][0][0])
-    except Exception as e:
-        print(f"[ORDERBOOK BID] {borsa} {coin} hata: {e}")
+    """Cache'ten bid fiyatını oku. Cache'te yoksa None (orderbook_ask ile aynı mantık)."""
+    veri = None
+    if borsa == "Binance":
+        veri = binance_cache.get(coin)
+    elif borsa == "Gate":
+        veri = gate_cache.get(coin)
+    elif borsa == "MEXC":
+        veri = mexc_cache.get(coin)
+    elif borsa == "OKX":
+        veri = okx_cache.get(coin)
+    elif borsa == "KuCoin":
+        veri = kucoin_cache.get(coin)
+    elif borsa == "Bybit":
+        veri = bybit_cache.get(coin)
+
+    if veri and veri.get("bid", 0) > 0:
+        return veri["bid"]
     return None
 
 
@@ -1253,12 +1281,14 @@ def bot_calistir():
     temizlik_thread.start()
 
     telegram_gonder(os.getenv("CHAT_ID_06"),
-        f"✅ <b>Arbitraj Alarm Botu v5 Başladı</b>\n"
+        f"✅ <b>Arbitraj Alarm Botu v5.1 Başladı</b>\n"
         f"🏦 Binance, Gate, MEXC, OKX, KuCoin, Bybit\n"
         f"🇹🇷 Paribu ↔ BTCTürk\n"
         f"📊 %0.6 / 📈 %1.5 / 🚀 %4.0\n"
-        f"🛡 Kademeli ban sistemi aktif\n"
-        f"💱 Min hacim: ${MIN_HACIM_USDT:,}"
+        f"🛡 Rate limit koruması: Binance 418/429 → {BINANCE_COOLDOWN//60}dk cooldown\n"
+        f"⚡ Cache TTL: {CACHE_TTL}sn | Orderbook workers: 10\n"
+        f"💱 Min hacim: ${MIN_HACIM_USDT:,}\n"
+        f"ℹ️ Komut: /stat /banlist /ban /unban"
     )
 
     while not _shutdown.is_set():
