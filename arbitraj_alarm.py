@@ -1269,27 +1269,26 @@ def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str, fark
                 al_tl  = tl_once(al_fiyat_str)
                 sat_tl = tl_once(sat_fiyat_str)
 
-                # Tasarım 1 — minimalist & hizalı
+                # Mesaj: eski al/sat tarzı + çizgilerle ayrılmış arb bloğu
                 # arb_str iki satırlı gelir:
-                #   "₺890,000 ($19,786)
-                #    🪙 Miktar   175,800 ITA"
-                # İlk satırı "💎 Hacim    ..." ile birlikte kullanırız,
-                # ikinci satır kendisi zaten "🪙 Miktar ..." diye başlar.
+                #   "₺353,185 ($7,850)
+                #    🪙 Miktar   1,506,060 VANRY"
                 satirlar = [
-                    f"🚨 <b>{coin}</b> — %{fark_yuzde:.2f} {grup_emoji}",
-                    "━━━━━━━━━━━━━━━",
-                    f"🟢 Al  │ <b>{al_borsa}</b>   {al_tl}",
-                    f"🔴 Sat │ <b>{sat_borsa}</b>   {sat_tl}",
-                    "━━━━━━━━━━━━━━━",
+                    f"🚨 <b>{coin}</b> {grup_emoji} %{fark_yuzde:.2f}",
+                    f"🟢 <b>{al_borsa}</b> → {al_tl}",
+                    f"🔴 <b>{sat_borsa}</b> → {sat_tl}",
                 ]
                 if arb_str:
-                    # arb_str = "₺X (₹Y)\n🪙 Miktar   Z COIN"  → iki ayrı satır olarak yaz
+                    # arb_str'i parçala: "₺X ($Y)\n🪙 Miktar   N COIN"
                     arb_satirlar = arb_str.split("\n")
-                    satirlar.append(f"💎 Hacim    {arb_satirlar[0]}")
+                    satirlar.append("━━━━━━━━━━━━━━━━━━━")
+                    satirlar.append(f"💎 Arbitraj Hacmi: {arb_satirlar[0]}")
+                    # "🪙 Miktar   N COIN" satırında iki nokta ekle → "🪙 Miktar:  N COIN"
                     for ek in arb_satirlar[1:]:
-                        satirlar.append(ek)
-                satirlar.append(f"📊 24h      {hacim_str}")
-                satirlar.append(f"⏱️ {zaman} · ₺{kur:.2f}")
+                        ek_duzenli = ek.replace("🪙 Miktar   ", "🪙 Miktar:  ")
+                        satirlar.append(ek_duzenli)
+                    satirlar.append("━━━━━━━━━━━━━━━━━━━")
+                satirlar.append(f"📊 24h: {hacim_str} | ₺{kur:.2f} | {zaman}")
                 mesaj = "\n".join(satirlar)
                 print(f"[{zaman}] {grup_emoji} {coin} {al_borsa}→{sat_borsa} %{fark_yuzde:.2f}"
                       + (f" | {arb_str.split(chr(10))[0]}" if arb_str else ""))
