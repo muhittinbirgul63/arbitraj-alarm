@@ -105,6 +105,15 @@ mexc_cache    = {}
 kucoin_cache  = {}
 bybit_cache   = {}
 
+# Bildirim state mutasyonları için lock — son_bildirim, coin_sayac, coin_ban,
+# ban_seviye orderbook worker thread'lerinden paralel modifiye ediliyor.
+# Read-modify-write atomik olmadığı için bu lock şart.
+_bildirim_lock = threading.Lock()
+
+# get_gruplar() sonucunu cache'le — env var'lar runtime'da değişmez,
+# her alarmda 4 os.getenv çağrısı gereksiz.
+_GRUPLAR_CACHE = None
+
 # Graceful shutdown — SIGTERM/SIGINT alındığında set edilir, ana döngü çıkar
 _shutdown = threading.Event()
 
@@ -114,6 +123,9 @@ _shutdown = threading.Event()
 ORDERBOOK_POOL = ThreadPoolExecutor(max_workers=10, thread_name_prefix="ob")
 # Telegram mesajları için ayrı havuz — orderbook worker'ları Telegram'ı beklemesin
 TELEGRAM_POOL  = ThreadPoolExecutor(max_workers=5,  thread_name_prefix="tg")
+# Borsa fetch'leri için sabit havuz — her tur 8 yeni thread yaratmak yerine
+# (saniyede 8 thread × 86400sn = günlük 691.000 thread yaratımı), sabit 8 worker.
+EXCHANGE_POOL  = ThreadPoolExecutor(max_workers=8,  thread_name_prefix="ex")
 
 # TTL cache — 5sn → 15sn: Binance /ticker/24hr weight=80. Dakikada 12 çağrı
 # (5sn TTL) 960 weight yapıyor; orderbook isteklerle toplam 1200'ü aşıp BAN
@@ -190,30 +202,32 @@ def periyodik_temizlik():
         simdi = time.time()
         silinen = 0
 
-        # son_bildirim: 1 günden eski kayıtlar (artık hiç gelmeyen coinler)
-        for k in list(son_bildirim.keys()):
-            if simdi - son_bildirim[k] > 86400:
-                del son_bildirim[k]
-                silinen += 1
+        # bildirim_gonder ile aynı dict'leri modifiye ediyoruz → lock şart
+        with _bildirim_lock:
+            # son_bildirim: 1 günden eski kayıtlar (artık hiç gelmeyen coinler)
+            for k in list(son_bildirim.keys()):
+                if simdi - son_bildirim[k] > 86400:
+                    del son_bildirim[k]
+                    silinen += 1
 
-        # coin_sayac: liste boşaldıysa veya hepsi eski ise
-        for k in list(coin_sayac.keys()):
-            coin_sayac[k] = [t for t in coin_sayac[k] if simdi - t < SPAM_SURE]
-            if not coin_sayac[k]:
-                del coin_sayac[k]
-                silinen += 1
+            # coin_sayac: liste boşaldıysa veya hepsi eski ise
+            for k in list(coin_sayac.keys()):
+                coin_sayac[k] = [t for t in coin_sayac[k] if simdi - t < SPAM_SURE]
+                if not coin_sayac[k]:
+                    del coin_sayac[k]
+                    silinen += 1
 
-        # coin_ban: süresi dolmuş ban'ler
-        for k in list(coin_ban.keys()):
-            if coin_ban[k] < simdi:
-                del coin_ban[k]
-                silinen += 1
+            # coin_ban: süresi dolmuş ban'ler
+            for k in list(coin_ban.keys()):
+                if coin_ban[k] < simdi:
+                    del coin_ban[k]
+                    silinen += 1
 
-        # ban_seviye: artık aktif olmayan coinler
-        for k in list(ban_seviye.keys()):
-            if k not in coin_ban and k not in son_bildirim:
-                del ban_seviye[k]
-                silinen += 1
+            # ban_seviye: artık aktif olmayan coinler
+            for k in list(ban_seviye.keys()):
+                if k not in coin_ban and k not in son_bildirim:
+                    del ban_seviye[k]
+                    silinen += 1
 
         if silinen > 0:
             print(f"[TEMİZLİK] {silinen} eski kayıt silindi, "
@@ -233,14 +247,18 @@ paribu_ws_bagli   = False
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
 
 def get_gruplar():
-    cid_06 = os.getenv("CHAT_ID_06")
-    cid_15 = os.getenv("CHAT_ID_15", cid_06)
-    cid_40 = os.getenv("CHAT_ID_40", cid_06)
-    return [
-        (4.0, cid_40),
-        (1.5, cid_15),
-        (0.6, cid_06),
-    ]
+    """Telegram chat ID'lerini cache'le — env var runtime'da değişmiyor."""
+    global _GRUPLAR_CACHE
+    if _GRUPLAR_CACHE is None:
+        cid_06 = os.getenv("CHAT_ID_06")
+        cid_15 = os.getenv("CHAT_ID_15", cid_06)
+        cid_40 = os.getenv("CHAT_ID_40", cid_06)
+        _GRUPLAR_CACHE = [
+            (4.0, cid_40),
+            (1.5, cid_15),
+            (0.6, cid_06),
+        ]
+    return _GRUPLAR_CACHE
 
 
 def _telegram_gonder_blocking(chat_id, mesaj):
@@ -268,7 +286,7 @@ def telegram_gonder(chat_id, mesaj):
 def komut_dinleyici():
     offset = 0
     print("[KOMUT] Dinleyici başladı")
-    while True:
+    while not _shutdown.is_set():
         try:
             r = _session.get(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
@@ -370,11 +388,14 @@ def borsa_hata_kontrol(borsa, basarili):
 # ─── FİYAT FORMATI ───────────────────────────────────────────────────────────
 
 def fiyat_formatla(fiyat):
-    if fiyat >= 1000:  return f"{fiyat:,.2f}"
-    elif fiyat >= 1:   return f"{fiyat:.4f}"
-    elif fiyat >= 0.01: return f"{fiyat:.4f}"
-    elif fiyat >= 0.001: return f"{fiyat:.5f}"
-    else:              return f"{fiyat:.6f}"
+    """Fiyat büyüklüğüne göre uygun hassasiyetle formatla.
+    Küçük fiyatlarda daha fazla decimal — memecoinlerde 0.0000123 gibi
+    fiyatları doğru göstermek için."""
+    if fiyat >= 1000:    return f"{fiyat:,.2f}"     # 67,890.12
+    elif fiyat >= 1:     return f"{fiyat:.4f}"      # 1.2345
+    elif fiyat >= 0.01:  return f"{fiyat:.5f}"      # 0.01234
+    elif fiyat >= 0.001: return f"{fiyat:.6f}"      # 0.001234
+    else:                return f"{fiyat:.8f}"      # 0.00001234
 
 
 # ─── BORSA FİYAT FONKSİYONLARI ───────────────────────────────────────────────
@@ -818,11 +839,11 @@ def paribu_ws_on_close(ws, close_status_code, close_msg):
 
 def paribu_ws_thread():
     """Arka plan thread'i — disconnect olursa otomatik yeniden bağlanır"""
-    while True:
+    while not _shutdown.is_set():
         # Market listesini tazele (ilk açılış ve her reconnect'te)
         if not paribu_market_listesi_cek():
             print("Paribu market listesi alınamadı, 30sn sonra tekrar denenecek...")
-            time.sleep(30)
+            if _shutdown.wait(30): break
             continue
 
         try:
@@ -836,8 +857,9 @@ def paribu_ws_thread():
             ws.run_forever(ping_interval=30, ping_timeout=10)
         except Exception as e:
             print(f"Paribu WS exception: {e}")
+        if _shutdown.is_set(): break
         print("Paribu WS 5sn sonra yeniden bağlanıyor...")
-        time.sleep(5)
+        if _shutdown.wait(5): break
 
 
 def paribu_tumfiyatlar():
@@ -845,23 +867,27 @@ def paribu_tumfiyatlar():
     Sadece hem ticker HEM orderbook verisi gelmiş olan coinleri döner:
     eksik bid/ask ile yapılan karşılaştırmalar yanlış alarm üretir."""
     try:
+        # Lock altında hızlı snapshot al, sonra filtrelemeyi lock dışında yap
+        with paribu_ws_lock:
+            snapshot = {k: dict(v) for k, v in paribu_ws_cache.items()}
+            son_snapshot = dict(paribu_ws_son)
+
         now = time.time()
         sonuc = {}
-        with paribu_ws_lock:
-            for coin, veri in paribu_ws_cache.items():
-                # Son 90sn içinde güncellenmiş coinleri dahil et (stale guard)
-                if now - paribu_ws_son.get(coin, 0) >= 90:
-                    continue
-                # Eksik veri filtresi: fiyat, bid, ask hepsi olmalı ve 0'dan büyük olmalı.
-                # İlk ticker/orderbook gelip de diğeri gelmemiş coinler bu filtreye takılır.
-                fiyat = veri.get("fiyat")
-                bid = veri.get("bid")
-                ask = veri.get("ask")
-                if not fiyat or not bid or not ask:
-                    continue
-                if fiyat <= 0 or bid <= 0 or ask <= 0:
-                    continue
-                sonuc[coin] = dict(veri)
+        for coin, veri in snapshot.items():
+            # Son 90sn içinde güncellenmiş coinleri dahil et (stale guard)
+            if now - son_snapshot.get(coin, 0) >= 90:
+                continue
+            # Eksik veri filtresi: fiyat, bid, ask hepsi olmalı ve 0'dan büyük olmalı.
+            # İlk ticker/orderbook gelip de diğeri gelmemiş coinler bu filtreye takılır.
+            fiyat = veri.get("fiyat")
+            bid = veri.get("bid")
+            ask = veri.get("ask")
+            if not fiyat or not bid or not ask:
+                continue
+            if fiyat <= 0 or bid <= 0 or ask <= 0:
+                continue
+            sonuc[coin] = veri
         if sonuc:
             borsa_hata_kontrol("Paribu", True)
         else:
@@ -969,6 +995,10 @@ _btcturk_ob_cache = {}      # {"BTC": (timestamp, bids_list, asks_list)}
 _btcturk_ob_lock = threading.Lock()
 BTCTURK_OB_TTL = 20.0       # saniye
 
+# BTCTürk pair format cache — bazı coinler "SPKTRY", bazıları "SPK_TRY" formatında.
+# İlk başarılı format'ı coin başına hatırla → her alarm 1 HTTP request (2 yerine).
+_btcturk_pair_format = {}   # {"BTC": "BTCTRY", "SPK": "SPK_TRY"}
+
 
 def btcturk_orderbook_al(coin):
     """BTCTürk /orderbook endpoint'ten tam orderbook çek. Cache'li.
@@ -989,8 +1019,13 @@ def btcturk_orderbook_al(coin):
     try:
         # BTCTürk API: pairSymbol formatı 'SPKTRY' (underscore YOK, dokümana göre).
         # Bazı eski coinler için 'SPK_TRY' de çalışıyordu — iki formatı da dene.
+        # İLK BAŞARILI format'ı cache'ten oku → tek HTTP request yeterli.
+        bilinen = _btcturk_pair_format.get(coin)
+        formatlar = (bilinen,) if bilinen else (f"{coin}TRY", f"{coin}_TRY")
+
         sonuc_data = None
-        for pair_format in (f"{coin}TRY", f"{coin}_TRY"):
+        kullanilan_format = None
+        for pair_format in formatlar:
             try:
                 r = _session.get("https://api.btcturk.com/api/v2/orderbook",
                                  params={"pairSymbol": pair_format, "limit": 25},
@@ -1003,12 +1038,17 @@ def btcturk_orderbook_al(coin):
                     d = jdata.get("data", {})
                     if d and (d.get("bids") or d.get("asks")):
                         sonuc_data = d
+                        kullanilan_format = pair_format
                         break
             except Exception:
                 continue
 
         if not sonuc_data:
             return None, None
+
+        # Başarılı format'ı hatırla — bir sonraki alarm tek istek atsın
+        if kullanilan_format and bilinen != kullanilan_format:
+            _btcturk_pair_format[coin] = kullanilan_format
 
         bids_raw = sonuc_data.get("bids", [])
         asks_raw = sonuc_data.get("asks", [])
@@ -1250,74 +1290,93 @@ def usdt_tl_kurlari(paribu, btcturk):
 def bildirim_gonder(coin, al_borsa, sat_borsa, al_fiyat_str, sat_fiyat_str,
                     fark_yuzde, hacim_usdt, kur, arb=None):
     """Arbitraj alarmı gönderir. `arb` dict veya None:
-       {'ana': '₺X ($Y)', 'miktar': '🪙 Miktar:  N COIN'}"""
+       {'ana': '₺X ($Y)', 'miktar': '🪙 Miktar:  N COIN'}
+
+    Thread-safety: Bu fonksiyon ORDERBOOK_POOL'dan paralel çağrılıyor.
+    son_bildirim/coin_sayac/coin_ban/ban_seviye mutasyonları _bildirim_lock
+    altında yapılır — read-modify-write atomik olmadığı için."""
     for esik, chat_id in get_gruplar():
         if fark_yuzde >= esik:
             anahtar = f"{coin}_{esik}"
             simdi   = time.time()
 
-            if anahtar in coin_ban:
-                if simdi < coin_ban[anahtar]:
-                    # Bu eşik banlı → atla, sıradaki daha düşük eşiğe geç
-                    continue
-                else:
-                    del coin_ban[anahtar]
-                    coin_sayac[anahtar] = []
-                    # Ban süresi dolduğunda ban_seviye'yi 1 azalt
-                    # (bir kere spam yapan coin ömür boyu yüksek seviye ban yemesin)
-                    if anahtar in ban_seviye and ban_seviye[anahtar] > 0:
-                        ban_seviye[anahtar] -= 1
+            # ─── Ban kontrolü + spam sayaç (kritik bölge) ─────────────────
+            with _bildirim_lock:
+                if anahtar in coin_ban:
+                    if simdi < coin_ban[anahtar]:
+                        # Bu eşik banlı → atla, sıradaki daha düşük eşiğe geç
+                        continue
+                    else:
+                        del coin_ban[anahtar]
+                        coin_sayac[anahtar] = []
+                        # Ban süresi dolduğunda ban_seviye'yi 1 azalt
+                        # (bir kere spam yapan coin ömür boyu yüksek seviye ban yemesin)
+                        if anahtar in ban_seviye and ban_seviye[anahtar] > 0:
+                            ban_seviye[anahtar] -= 1
 
-            son     = son_bildirim.get(anahtar, 0)
-            bekleme = TEKRAR_SURE.get(esik, 600)
-            if simdi - son > bekleme:
-                # Mesaj gönder
+                son     = son_bildirim.get(anahtar, 0)
+                bekleme = TEKRAR_SURE.get(esik, 600)
+                if simdi - son <= bekleme:
+                    # Henüz bekleme dolmadı, hiç mesaj gönderme
+                    break
+
+                # Mesaj gönderilecek — son_bildirim'i hemen güncelle ki
+                # paralel çağrılar tekrar göndermesin
                 son_bildirim[anahtar] = simdi
-                zaman      = datetime.now(TZ_TR).strftime("%H:%M:%S")
-                grup_emoji = GRUP_EMOJI.get(esik, "📊")
-                hacim_str  = f"${hacim_usdt:,.0f}" if hacim_usdt >= MIN_HACIM_USDT else "⚠️ Yetersiz"
 
-                al_tl  = _fiyat_tl_once(al_fiyat_str)
-                sat_tl = _fiyat_tl_once(sat_fiyat_str)
-
-                # Mesaj: eski al/sat tarzı + çizgilerle ayrılmış arb bloğu
-                satirlar = [
-                    f"🚨 <b>{coin}</b> {grup_emoji} %{fark_yuzde:.2f}",
-                    f"🟢 <b>{al_borsa}</b> → {al_tl}",
-                    f"🔴 <b>{sat_borsa}</b> → {sat_tl}",
-                    "━━━━━━━━━━━━━━━━━━━",
-                ]
-                if arb:
-                    satirlar.append(f"💎 Arbitraj Hacmi: {arb['ana']}")
-                    satirlar.append(arb['miktar'])
-                else:
-                    satirlar.append("💎 Arbitraj Hacmi: hesaplanamadı")
-                satirlar.append("━━━━━━━━━━━━━━━━━━━")
-                satirlar.append(f"📊 24h: {hacim_str} | ₺{kur:.2f} | {zaman}")
-                mesaj = "\n".join(satirlar)
-                print(f"[{zaman}] {grup_emoji} {coin} {al_borsa}→{sat_borsa} %{fark_yuzde:.2f}"
-                      + (f" | {arb['ana']}" if arb else " | arb:?"))
-                telegram_gonder(chat_id, mesaj)
-
-                # Mesaj atıldıktan sonra sayaca ekle
+                # Sayaca ekle (lock altında — atomik)
                 if anahtar not in coin_sayac:
                     coin_sayac[anahtar] = []
                 coin_sayac[anahtar] = [t for t in coin_sayac[anahtar] if simdi - t < SPAM_SURE]
                 coin_sayac[anahtar].append(simdi)
 
+                # Spam limiti aşıldı mı? Ban tetikle (lock altında)
+                ban_tetiklendi = False
                 if len(coin_sayac[anahtar]) > SPAM_LIMIT:
                     seviye   = ban_seviye.get(anahtar, 0)
                     ban_sure = BAN_SURELER[min(seviye, len(BAN_SURELER)-1)]
                     coin_ban[anahtar]   = simdi + ban_sure
                     ban_seviye[anahtar] = seviye + 1
                     coin_sayac[anahtar] = []
-                    ban_dk  = ban_sure // 60
-                    ban_sa  = ban_dk // 60
-                    ban_str = f"{ban_sa} saat" if ban_sa > 0 else f"{ban_dk} dakika"
-                    print(f"[BAN] {coin} %{esik} - {ban_str} ban (seviye {seviye+1})")
-                    telegram_gonder(chat_id,
-                        f"🚫 <b>{coin}</b> — {ban_str} ban\n"
-                        f"10 dakikada {SPAM_LIMIT}+ bildirim gönderildi.")
+                    ban_tetiklendi = (seviye, ban_sure)
+
+            # ─── Mesaj oluşturma + gönderme (lock dışında) ─────────────────
+            zaman      = datetime.now(TZ_TR).strftime("%H:%M:%S")
+            grup_emoji = GRUP_EMOJI.get(esik, "📊")
+            hacim_str  = f"${hacim_usdt:,.0f}" if hacim_usdt >= MIN_HACIM_USDT else "⚠️ Yetersiz"
+
+            al_tl  = _fiyat_tl_once(al_fiyat_str)
+            sat_tl = _fiyat_tl_once(sat_fiyat_str)
+
+            # Mesaj: eski al/sat tarzı + çizgilerle ayrılmış arb bloğu
+            satirlar = [
+                f"🚨 <b>{coin}</b> {grup_emoji} %{fark_yuzde:.2f}",
+                f"🟢 <b>{al_borsa}</b> → {al_tl}",
+                f"🔴 <b>{sat_borsa}</b> → {sat_tl}",
+                "━━━━━━━━━━━━━━━━━━━",
+            ]
+            if arb:
+                satirlar.append(f"💎 Arbitraj Hacmi: {arb['ana']}")
+                satirlar.append(arb['miktar'])
+            else:
+                satirlar.append("💎 Arbitraj Hacmi: hesaplanamadı")
+            satirlar.append("━━━━━━━━━━━━━━━━━━━")
+            satirlar.append(f"📊 24h: {hacim_str} | ₺{kur:.2f} | {zaman}")
+            mesaj = "\n".join(satirlar)
+            print(f"[{zaman}] {grup_emoji} {coin} {al_borsa}→{sat_borsa} %{fark_yuzde:.2f}"
+                  + (f" | {arb['ana']}" if arb else " | arb:?"))
+            telegram_gonder(chat_id, mesaj)
+
+            # Ban mesajı (eğer tetiklendiyse)
+            if ban_tetiklendi:
+                seviye, ban_sure = ban_tetiklendi
+                ban_dk  = ban_sure // 60
+                ban_sa  = ban_dk // 60
+                ban_str = f"{ban_sa} saat" if ban_sa > 0 else f"{ban_dk} dakika"
+                print(f"[BAN] {coin} %{esik} - {ban_str} ban (seviye {seviye+1})")
+                telegram_gonder(chat_id,
+                    f"🚫 <b>{coin}</b> — {ban_str} ban\n"
+                    f"10 dakikada {SPAM_LIMIT}+ bildirim gönderildi.")
             break
 
 
@@ -1587,12 +1646,12 @@ def bot_calistir():
     temizlik_thread.start()
 
     telegram_gonder(os.getenv("CHAT_ID_06"),
-        f"✅ <b>Arbitraj Alarm Botu v5.1 Başladı</b>\n"
+        f"✅ <b>Arbitraj Alarm Botu v5.2 Başladı</b>\n"
         f"🏦 Binance, Gate, MEXC, OKX, KuCoin, Bybit\n"
         f"🇹🇷 Paribu ↔ BTCTürk\n"
         f"📊 %0.6 / 📈 %1.5 / 🚀 %4.0\n"
         f"🛡 Rate limit koruması: Binance 418/429 → {BINANCE_COOLDOWN//60}dk cooldown\n"
-        f"⚡ Cache TTL: {CACHE_TTL}sn | Orderbook workers: 10\n"
+        f"⚡ Cache TTL: {CACHE_TTL}sn | Orderbook workers: 10 | Exchange pool: 8\n"
         f"💱 Min hacim: ${MIN_HACIM_USDT:,}\n"
         f"ℹ️ Komut: /stat /banlist /ban /unban"
     )
@@ -1606,25 +1665,27 @@ def bot_calistir():
         tur_baslangic = time.time()
         print(f"\n[{datetime.now(TZ_TR).strftime('%H:%M:%S')}] Fiyatlar çekiliyor...")
 
-        # Tüm borsaları paralel çek
-        sonuclar = {}
-        def cek(isim, fn):
-            veri = fn()
-            with sonuclar_lock:
-                sonuclar[isim] = veri
-
-        threadler = [
-            threading.Thread(target=cek, args=("binance", binance_tumfiyatlar)),
-            threading.Thread(target=cek, args=("gate",    gate_tumfiyatlar)),
-            threading.Thread(target=cek, args=("mexc",    mexc_tumfiyatlar)),
-            threading.Thread(target=cek, args=("okx",     okx_tumfiyatlar)),
-            threading.Thread(target=cek, args=("kucoin",  kucoin_tumfiyatlar)),
-            threading.Thread(target=cek, args=("bybit",   bybit_tumfiyatlar)),
-            threading.Thread(target=cek, args=("paribu",  paribu_tumfiyatlar)),
-            threading.Thread(target=cek, args=("btcturk", btcturk_tumfiyatlar)),
+        # Tüm borsaları paralel çek — sabit havuz, her tur thread yaratma yok
+        borsa_fns = [
+            ("binance", binance_tumfiyatlar),
+            ("gate",    gate_tumfiyatlar),
+            ("mexc",    mexc_tumfiyatlar),
+            ("okx",     okx_tumfiyatlar),
+            ("kucoin",  kucoin_tumfiyatlar),
+            ("bybit",   bybit_tumfiyatlar),
+            ("paribu",  paribu_tumfiyatlar),
+            ("btcturk", btcturk_tumfiyatlar),
         ]
-        for t in threadler: t.start()
-        for t in threadler: t.join(timeout=20)
+        future_isim = {EXCHANGE_POOL.submit(fn): isim for isim, fn in borsa_fns}
+        sonuclar = {}
+        # 20sn timeout — ttl_cache sayesinde fonksiyonlar genelde anında dönüyor
+        for fut in list(future_isim.keys()):
+            isim = future_isim[fut]
+            try:
+                sonuclar[isim] = fut.result(timeout=20)
+            except Exception as e:
+                print(f"[FETCH] {isim} hata: {e}")
+                sonuclar[isim] = {}
 
         binance = sonuclar.get("binance", {})
         gate    = sonuclar.get("gate",    {})
@@ -1635,26 +1696,27 @@ def bot_calistir():
         paribu  = sonuclar.get("paribu",  {})
         btcturk = sonuclar.get("btcturk", {})
 
-        # Cache güncelle (orderbook isteği atmamak için)
-        okx_cache.clear();     okx_cache.update(okx)
-        binance_cache.clear(); binance_cache.update(binance)
-        gate_cache.clear();    gate_cache.update(gate)
-        mexc_cache.clear();    mexc_cache.update(mexc)
-        kucoin_cache.clear();  kucoin_cache.update(kucoin)
-        bybit_cache.clear();   bybit_cache.update(bybit)
+        # Cache atomic rebind — orderbook_ask/bid worker'ları clear() penceresinde
+        # boş cache okumasın diye `clear()/update()` yerine global rebind.
+        # Boş dict gelirse eski cache'i koru (cooldown vs).
+        global binance_cache, gate_cache, mexc_cache, okx_cache, kucoin_cache, bybit_cache
+        if binance: binance_cache = binance
+        if gate:    gate_cache    = gate
+        if mexc:    mexc_cache    = mexc
+        if okx:     okx_cache     = okx
+        if kucoin:  kucoin_cache  = kucoin
+        if bybit:   bybit_cache   = bybit
 
         kurlar = usdt_tl_kurlari(paribu, btcturk)
         if not kurlar:
             print("USDT/TL kuru alınamadı, bekleniyor...")
-            time.sleep(10)
+            if _shutdown.wait(10): break
             continue
 
         kur_paribu = kurlar["Paribu"]
         kur_btcturk = kurlar["BTCTürk"]
         print(f"USDT/TL Paribu:{kur_paribu:.2f} BTCTürk:{kur_btcturk:.2f} | "
               f"Paribu:{len(paribu)} BTCTürk:{len(btcturk)} Binance:{len(binance)} Bybit:{len(bybit)} coin")
-
-        tl_coinler = (set(paribu.keys()) | set(btcturk.keys())) - {"USDT"}
 
         usdt_borsalar = {
             "Binance": binance,
@@ -1665,30 +1727,43 @@ def bot_calistir():
             "Bybit":   bybit,
         }
 
+        # ── Set-bazlı pre-filter — O(coins × borsalar) iç döngü yerine
+        #    O(intersection) — non-existent coin'ler için dict lookup yok.
+        manuel_ban_snapshot = MANUEL_BAN.copy()
+        paribu_set  = set(paribu.keys())  - manuel_ban_snapshot - {"USDT"}
+        btcturk_set = set(btcturk.keys()) - manuel_ban_snapshot - {"USDT"}
+
         # ── 1. Hızlı ön tarama (orderbook yok) ──
         adaylar = []
-        for coin in tl_coinler:
-            if coin in MANUEL_BAN:
-                continue
+        for borsa_usdt, fiyatlar_usdt in usdt_borsalar.items():
+            usdt_set = set(fiyatlar_usdt.keys())
+
+            # Paribu ↔ borsa_usdt
+            for coin in paribu_set & usdt_set:
+                try:
+                    sonuc = karsilastir(coin, fiyatlar_usdt[coin], paribu[coin],
+                                        borsa_usdt, "Paribu", kur_paribu)
+                    if sonuc:
+                        adaylar.extend(sonuc)
+                except Exception as e:
+                    print(f"[KARŞILAŞTIR] {coin} {borsa_usdt}↔Paribu hata: {e}")
+
+            # BTCTürk ↔ borsa_usdt
+            for coin in btcturk_set & usdt_set:
+                try:
+                    sonuc = karsilastir(coin, fiyatlar_usdt[coin], btcturk[coin],
+                                        borsa_usdt, "BTCTürk", kur_btcturk)
+                    if sonuc:
+                        adaylar.extend(sonuc)
+                except Exception as e:
+                    print(f"[KARŞILAŞTIR] {coin} {borsa_usdt}↔BTCTürk hata: {e}")
+
+        # Paribu ↔ BTCTürk (USDT borsalarından bağımsız, dış döngü dışında)
+        for coin in paribu_set & btcturk_set:
             try:
-                for borsa_usdt, fiyatlar_usdt in usdt_borsalar.items():
-                    if coin not in fiyatlar_usdt:
-                        continue
-                    if coin in paribu:
-                        sonuc = karsilastir(coin, fiyatlar_usdt[coin], paribu[coin], borsa_usdt, "Paribu", kur_paribu)
-                        if sonuc:
-                            adaylar.extend(sonuc)
-                    if coin in btcturk:
-                        sonuc = karsilastir(coin, fiyatlar_usdt[coin], btcturk[coin], borsa_usdt, "BTCTürk", kur_btcturk)
-                        if sonuc:
-                            adaylar.extend(sonuc)
-                if coin in paribu and coin in btcturk:
-                    # Paribu↔BTCTürk karşılaştırması — iki kuru da geçir
-                    karsilastir_tl(coin, paribu[coin], btcturk[coin], kur_paribu, kur_btcturk)
+                karsilastir_tl(coin, paribu[coin], btcturk[coin], kur_paribu, kur_btcturk)
             except Exception as e:
-                # Tek bir coin hata verirse diğerleri çalışmaya devam etsin
-                print(f"[KARŞILAŞTIR] {coin} hata: {e}")
-                continue
+                print(f"[KARŞILAŞTIR] {coin} Paribu↔BTCTürk hata: {e}")
 
         # ── 2. Adaylar için orderbook'ları paralel çek ──
         if adaylar:
@@ -1709,6 +1784,7 @@ def bot_calistir():
     TELEGRAM_POOL.shutdown(wait=True)  # kuyruktaki mesajlar gitsin
     print("🧹 Worker havuzları kapatılıyor...")
     ORDERBOOK_POOL.shutdown(wait=False, cancel_futures=True)
+    EXCHANGE_POOL.shutdown(wait=False, cancel_futures=True)
     print("✅ Bot temiz kapandı")
 
 
