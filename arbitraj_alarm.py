@@ -23,6 +23,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _session = requests.Session()
+# Connection pool size — default 10, ama 700+ aday × paralel fetch ile yetersiz.
+# Komut cevapları connection beklerken takılıyor. 100 connection yeterli alan.
+_pool_adapter = requests.adapters.HTTPAdapter(
+    pool_connections=20,
+    pool_maxsize=100,
+    max_retries=0,
+)
+_session.mount("https://", _pool_adapter)
+_session.mount("http://",  _pool_adapter)
+
+# Komut cevapları için ayrı session — alarm trafiğinin pool'una takılmasın.
+# Bot komutlarına anında cevap için kritik.
+_komut_session = requests.Session()
+_komut_session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=2, pool_maxsize=5, max_retries=0))
 
 TZ_TR = timezone(timedelta(hours=3))
 
@@ -261,11 +275,13 @@ def get_gruplar():
     return _GRUPLAR_CACHE
 
 
-def _telegram_gonder_blocking(chat_id, mesaj):
-    """Gerçek Telegram HTTP çağrısı — arka plan thread'inde çalışır"""
+def _telegram_gonder_blocking(chat_id, mesaj, komut=False):
+    """Gerçek Telegram HTTP çağrısı — arka plan thread'inde çalışır.
+    komut=True → ayrı session kullan (alarm trafiğinin pool'unda beklemesin)."""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        _session.post(url, json={
+        sess = _komut_session if komut else _session
+        sess.post(url, json={
             "chat_id": chat_id,
             "text": mesaj,
             "parse_mode": "HTML"
@@ -313,23 +329,23 @@ def komut_dinleyici():
                     coin = metin[5:].strip().upper()
                     MANUEL_BAN.add(coin)
                     manuel_ban_kaydet()  # Kalıcı sakla
-                    # Komut cevabı direkt gidiyor — pool kuyruğunda alarm mesajları
-                    # arasında beklemesin (yoğun saatlerde 30sn+ gecikme oluyordu)
-                    _telegram_gonder_blocking(chat_id, f"🚫 <b>{coin}</b> banlı listeye eklendi.")
+                    # Komut cevabı ayrı session ile gidiyor — alarm trafiğinin
+                    # connection pool'unda beklemesin (yoğun saatlerde takılıyordu)
+                    _telegram_gonder_blocking(chat_id, f"🚫 <b>{coin}</b> banlı listeye eklendi.", komut=True)
                     print(f"[KOMUT] /ban {coin} - Banlı: {MANUEL_BAN}")
 
                 elif metin.startswith("/unban "):
                     coin = metin[7:].strip().upper()
                     MANUEL_BAN.discard(coin)
                     manuel_ban_kaydet()  # Kalıcı sakla
-                    _telegram_gonder_blocking(chat_id, f"✅ <b>{coin}</b> ban listesinden çıkarıldı.")
+                    _telegram_gonder_blocking(chat_id, f"✅ <b>{coin}</b> ban listesinden çıkarıldı.", komut=True)
                     print(f"[KOMUT] /unban {coin}")
 
                 elif metin == "/banlist":
                     if MANUEL_BAN:
-                        _telegram_gonder_blocking(chat_id, "🚫 <b>Banlı Coinler:</b>\n" + ", ".join(sorted(MANUEL_BAN)))
+                        _telegram_gonder_blocking(chat_id, "🚫 <b>Banlı Coinler:</b>\n" + ", ".join(sorted(MANUEL_BAN)), komut=True)
                     else:
-                        _telegram_gonder_blocking(chat_id, "✅ Banlı coin yok.")
+                        _telegram_gonder_blocking(chat_id, "✅ Banlı coin yok.", komut=True)
 
                 elif metin == "/stat":
                     # Bot sağlık durumu — Binance cooldown, borsa hata sayaçları vs.
@@ -369,7 +385,7 @@ def komut_dinleyici():
                     else:
                         satirlar.append(f"🔴 Paribu WS: BAĞLANTI YOK")
 
-                    _telegram_gonder_blocking(chat_id, "\n".join(satirlar))
+                    _telegram_gonder_blocking(chat_id, "\n".join(satirlar), komut=True)
 
         except Exception as e:
             print(f"[KOMUT HATA] {e}")
