@@ -341,13 +341,13 @@ def komut_dinleyici():
                     _telegram_gonder_blocking(chat_id, f"✅ <b>{coin}</b> ban listesinden çıkarıldı.", komut=True)
                     print(f"[KOMUT] /unban {coin}")
 
-                elif metin == "/banlist":
+                elif metin.split()[0] == "/banlist":
                     if MANUEL_BAN:
                         _telegram_gonder_blocking(chat_id, "🚫 <b>Banlı Coinler:</b>\n" + ", ".join(sorted(MANUEL_BAN)), komut=True)
                     else:
                         _telegram_gonder_blocking(chat_id, "✅ Banlı coin yok.", komut=True)
 
-                elif metin == "/stat":
+                elif metin.split()[0] == "/stat":
                     # Bot sağlık durumu — Binance cooldown, borsa hata sayaçları vs.
                     zaman = datetime.now(TZ_TR).strftime("%H:%M:%S")
                     satirlar = [f"📊 <b>Bot Durumu</b> [{zaman}]"]
