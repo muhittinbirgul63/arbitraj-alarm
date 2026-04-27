@@ -313,21 +313,23 @@ def komut_dinleyici():
                     coin = metin[5:].strip().upper()
                     MANUEL_BAN.add(coin)
                     manuel_ban_kaydet()  # Kalıcı sakla
-                    telegram_gonder(chat_id, f"🚫 <b>{coin}</b> banlı listeye eklendi.")
+                    # Komut cevabı direkt gidiyor — pool kuyruğunda alarm mesajları
+                    # arasında beklemesin (yoğun saatlerde 30sn+ gecikme oluyordu)
+                    _telegram_gonder_blocking(chat_id, f"🚫 <b>{coin}</b> banlı listeye eklendi.")
                     print(f"[KOMUT] /ban {coin} - Banlı: {MANUEL_BAN}")
 
                 elif metin.startswith("/unban "):
                     coin = metin[7:].strip().upper()
                     MANUEL_BAN.discard(coin)
                     manuel_ban_kaydet()  # Kalıcı sakla
-                    telegram_gonder(chat_id, f"✅ <b>{coin}</b> ban listesinden çıkarıldı.")
+                    _telegram_gonder_blocking(chat_id, f"✅ <b>{coin}</b> ban listesinden çıkarıldı.")
                     print(f"[KOMUT] /unban {coin}")
 
                 elif metin == "/banlist":
                     if MANUEL_BAN:
-                        telegram_gonder(chat_id, "🚫 <b>Banlı Coinler:</b>\n" + ", ".join(sorted(MANUEL_BAN)))
+                        _telegram_gonder_blocking(chat_id, "🚫 <b>Banlı Coinler:</b>\n" + ", ".join(sorted(MANUEL_BAN)))
                     else:
-                        telegram_gonder(chat_id, "✅ Banlı coin yok.")
+                        _telegram_gonder_blocking(chat_id, "✅ Banlı coin yok.")
 
                 elif metin == "/stat":
                     # Bot sağlık durumu — Binance cooldown, borsa hata sayaçları vs.
@@ -367,7 +369,7 @@ def komut_dinleyici():
                     else:
                         satirlar.append(f"🔴 Paribu WS: BAĞLANTI YOK")
 
-                    telegram_gonder(chat_id, "\n".join(satirlar))
+                    _telegram_gonder_blocking(chat_id, "\n".join(satirlar))
 
         except Exception as e:
             print(f"[KOMUT HATA] {e}")
